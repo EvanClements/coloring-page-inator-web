@@ -185,6 +185,20 @@ function processRegionBoundary() {
         }
     }
 
+    let cannyEdges = new cv.Mat();
+    cv.Canny(filtered, cannyEdges, 30, 90);
+    cv.bitwise_not(cannyEdges, cannyEdges);
+    
+    // Restrict Canny to the dilated region-boundary neighborhood
+    let dilated = new cv.Mat();
+    let dk = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+    cv.dilate(cleaned, dilated, dk);
+    cv.min(dilated, cannyEdges, cannyEdges);
+    
+    // Merge
+    cv.min(cleaned, cannyEdges, dst);
+    cv.bitwise_not(dst, dst); // Final invert to black lines on white
+    
     // 8. Invert to black lines on white
     cv.bitwise_not(cleaned, dst);
 
@@ -199,6 +213,9 @@ function processRegionBoundary() {
     stats.delete();
     centroids.delete();
     cleaned.delete();
+    cannyEdges.delete();
+    dilated.delete();
+    dk.delete();
 }
 
 document.getElementById('downloadBtn').addEventListener('click', () => {
