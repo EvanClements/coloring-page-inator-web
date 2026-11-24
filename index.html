@@ -2,27 +2,73 @@
 <html>
 <head>
     <title>Coloring Page Inator (Prototype)</title>
-    <!-- Load OpenCV.js asynchronously -->
     <script async src="https://docs.opencv.org/4.10.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
     <style>
         body { font-family: sans-serif; text-align: center; padding: 20px; }
         canvas { border: 1px solid #ccc; max-width: 100%; margin: 10px; }
         #status { color: #666; margin: 10px; }
+        #controls { margin: 15px auto; max-width: 480px; text-align: left; }
+        .slider-row { margin: 8px 0; }
+        .slider-row label { display: inline-block; width: 150px; }
+        .slider-row input[type="range"] { width: 200px; vertical-align: middle; }
+        .slider-row span { display: inline-block; width: 40px; text-align: right; }
+        .hidden { display: none; }
     </style>
 </head>
 <body>
     <h2>Photo to Coloring Page</h2>
     <p id="status">Loading OpenCV.js...</p>
-    
+
     <input type="file" id="fileInput" accept="image/*">
     <br>
-    
-    <!-- Source canvas (hidden) and Output canvas -->
+
     <canvas id="canvasInput" style="display:none;"></canvas>
     <canvas id="canvasOutput"></canvas>
     <br>
-    
+
     <button id="downloadBtn" disabled>Download Coloring Page</button>
+
+    <div id="controls">
+        <div class="slider-row">
+            <label for="methodSelect">Method:</label>
+            <select id="methodSelect">
+                <option value="adaptive">Adaptive Threshold</option>
+                <option value="canny">Canny Edge</option>
+            </select>
+        </div>
+
+        <!-- Adaptive controls -->
+        <div id="adaptiveControls">
+            <div class="slider-row">
+                <label for="blockSize">Block Size:</label>
+                <input type="range" id="blockSize" min="3" max="51" step="2" value="21">
+                <span id="blockSizeVal">21</span>
+            </div>
+            <div class="slider-row">
+                <label for="cValue">C:</label>
+                <input type="range" id="cValue" min="0" max="20" step="1" value="8">
+                <span id="cValueVal">8</span>
+            </div>
+        </div>
+
+        <!-- Canny controls -->
+        <div id="cannyControls" class="hidden">
+            <div class="slider-row">
+                <label for="cannyLow">Low Threshold:</label>
+                <input type="range" id="cannyLow" min="0" max="255" step="1" value="50">
+                <span id="cannyLowVal">50</span>
+            </div>
+            <div class="slider-row">
+                <label for="cannyHigh">High Threshold:</label>
+                <input type="range" id="cannyHigh" min="0" max="255" step="1" value="150">
+                <span id="cannyHighVal">150</span>
+            </div>
+        </div>
+
+        <div class="slider-row">
+            <button id="reprocessBtn" disabled>Re-process</button>
+        </div>
+    </div>
 
     <script src="app.js"></script>
 </body>
