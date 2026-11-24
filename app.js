@@ -1,14 +1,18 @@
-// let src, dst, gray, blurred;
+let src, dst, gray, blurred;
 let openCvReady = false;
 
 // 1. Wait for OpenCV to load
 function onOpenCvReady() {
-    openCvReady = true;
-    document.getElementById('status').innerText = 'OpenCV.js is ready. Upload a photo!';
-    let src = new cv.Mat();
-    let dst = new cv.Mat();
-    let gray = new cv.Mat();
-    let blurred = new cv.Mat();
+    // Wait for the runtime to truly initialize
+    cv['onRuntimeInitialized'] = () => {
+        openCvReady = true;
+        document.getElementById('status').innerText = 'OpenCV.js is ready. Upload a photo!';
+        
+        src = new cv.Mat();
+        dst = new cv.Mat();
+        gray = new cv.Mat();
+        blurred = new cv.Mat();
+    };
 }
 
 // 2. Handle File Upload
