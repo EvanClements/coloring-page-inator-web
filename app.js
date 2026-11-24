@@ -1,5 +1,7 @@
 let src, dst, gray, blurred;
 let openCvReady = false;
+let blockSize = 11;
+let cValue = 2;
 
 // 1. Wait for OpenCV to load
 function onOpenCvReady() {
@@ -53,7 +55,7 @@ function processImage() {
     cv.GaussianBlur(gray, blurred, ksize, 0, 0, cv.BORDER_DEFAULT);
 
     // Adaptive thresholding: good for bold, kid-friendly outlines
-    cv.adaptiveThreshold(blurred, dst, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 11, 2);
+    cv.adaptiveThreshold(blurred, dst, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, blockSize, cValue);
 
     cv.imshow('canvasOutput', dst);
     document.getElementById('downloadBtn').disabled = false;
