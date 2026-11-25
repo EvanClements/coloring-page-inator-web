@@ -197,7 +197,7 @@
                 logDebug(`Inference complete. Output tensor type: ${results[outputKey].type}`);
                 logDebug(`Output dims: [${results[outputKey].dims.join(', ')}]`);
 
-                // 4. Post-process (Dynamic Contrast Stretch + Masking + Median Filter + Dilation)
+                // 4. Post-process (Mask Silhouette + TEED Details)
                 outCanvas.width = INPUT_SIZE;
                 outCanvas.height = INPUT_SIZE;
                 const outImgData = outCtx.createImageData(INPUT_SIZE, INPUT_SIZE);
@@ -208,16 +208,17 @@
                     max = Math.max(max, outputData[i]);
                 }
                 const range = max - min || 1;
-                const binaryMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
                 
-                const threshold = 0.50; 
+                // 1. Get the TEED edges (High confidence only)
+                const edgeMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
+                const edgeThreshold = 0.65; // High threshold to only get eyes/nose, no fur
                 
                 for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
                     const normalized = (outputData[i] - min) / range;
-                    binaryMask[i] = normalized > threshold ? 1 : 0;
+                    edgeMask[i] = normalized > edgeThreshold ? 1 : 0;
                 }
 
-                // Apply the Foreground Mask
+                // 2. Get the AI Foreground Mask (The solid cat silhouette)
                 const maskCanvas = document.createElement('canvas');
                 maskCanvas.width = INPUT_SIZE;
                 maskCanvas.height = INPUT_SIZE;
@@ -232,66 +233,58 @@
                 maskCtx.drawImage(img, outOffsetX, outOffsetY, outDrawW, outDrawH);
                 const maskData = maskCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
 
-                for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
-                    if (maskData[i * 4 + 3] < 128) {
-                        binaryMask[i] = 0;
-                    }
-                }
-
-                // --- NEW: Median Filter (Removes speckles/noise) ---
-                const filteredMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
-                for (let y = 1; y < INPUT_SIZE - 1; y++) {
-                    for (let x = 1; x < INPUT_SIZE - 1; x++) {
-                        const i = y * INPUT_SIZE + x;
-                        let sum = 0;
-                        // Check 3x3 neighborhood
-                        for (let dy = -1; dy <= 1; dy++) {
-                            for (let dx = -1; dx <= 1; dx++) {
-                                sum += binaryMask[i + dy * INPUT_SIZE + dx];
-                            }
-                        }
-                        // If the majority of the surrounding pixels are lines (>= 5 out of 9), it's a line.
-                        filteredMask[i] = sum >= 5 ? 1 : 0;
-                    }
-                }
-
-                // --- Dilation (Thicken lines) ---
-                const dilatedMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
-                for (let y = 1; y < INPUT_SIZE - 1; y++) {
-                    for (let x = 1; x < INPUT_SIZE - 1; x++) {
-                        const i = y * INPUT_SIZE + x;
-                        if (filteredMask[i] === 1) {
-                            dilatedMask[i] = 1;
-                            dilatedMask[i - 1] = 1;
-                            dilatedMask[i + 1] = 1;
-                            dilatedMask[i - INPUT_SIZE] = 1;
-                            dilatedMask[i + INPUT_SIZE] = 1;
-                        }
-                    }
-                }
-
-                // Remove isolated dots
+                // 3. Combine them
                 const finalMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
+                
                 for (let y = 1; y < INPUT_SIZE - 1; y++) {
                     for (let x = 1; x < INPUT_SIZE - 1; x++) {
                         const i = y * INPUT_SIZE + x;
-                        if (dilatedMask[i] === 1) {
-                            let neighbors = 0;
-                            if (dilatedMask[i - 1] === 1) neighbors++;
-                            if (dilatedMask[i + 1] === 1) neighbors++;
-                            if (dilatedMask[i - INPUT_SIZE] === 1) neighbors++;
-                            if (dilatedMask[i + INPUT_SIZE] === 1) neighbors++;
+                        
+                        const isCat = maskData[i * 4 + 3] > 128; // Is this inside the cat?
+                        const isEdge = edgeMask[i] === 1;        // Did TEED find a line here?
+                        
+                        if (!isCat) {
+                            finalMask[i] = 0; // Outside the cat = always white
+                            continue;
+                        }
+
+                        // If TEED found an edge inside the cat, draw it
+                        if (isEdge) {
+                            finalMask[i] = 1;
+                        } 
+                        // If this pixel is on the boundary of the cat, draw it
+                        else {
+                            const leftCat = maskData[(i - 1) * 4 + 3] > 128;
+                            const rightCat = maskData[(i + 1) * 4 + 3] > 128;
+                            const upCat = maskData[(i - INPUT_SIZE) * 4 + 3] > 128;
+                            const downCat = maskData[(i + INPUT_SIZE) * 4 + 3] > 128;
                             
-                            if (neighbors >= 2) {
+                            // If a neighboring pixel is NOT the cat, this is the silhouette outline
+                            if (!leftCat || !rightCat || !upCat || !downCat) {
                                 finalMask[i] = 1;
                             }
                         }
                     }
                 }
 
-                // Render to Canvas
+                // 4. Thicken lines slightly and clean up
+                const thickMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
+                for (let y = 1; y < INPUT_SIZE - 1; y++) {
+                    for (let x = 1; x < INPUT_SIZE - 1; x++) {
+                        const i = y * INPUT_SIZE + x;
+                        if (finalMask[i] === 1) {
+                            thickMask[i] = 1;
+                            thickMask[i - 1] = 1;
+                            thickMask[i + 1] = 1;
+                            thickMask[i - INPUT_SIZE] = 1;
+                            thickMask[i + INPUT_SIZE] = 1;
+                        }
+                    }
+                }
+
+                // 5. Render to Canvas
                 for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
-                    const color = finalMask[i] === 1 ? 0 : 255; 
+                    const color = thickMask[i] === 1 ? 0 : 255; 
                     outImgData.data[i * 4] = color;
                     outImgData.data[i * 4 + 1] = color;
                     outImgData.data[i * 4 + 2] = color;
