@@ -189,12 +189,11 @@
                 logDebug(`Inference complete. Output tensor type: ${results[outputKey].type}`);
                 logDebug(`Output dims: [${results[outputKey].dims.join(', ')}]`);
 
-                // 4. Post-process (Dynamic Contrast Stretch + Threshold + Morphological Close)
+                // 4. Post-process (Dynamic Contrast Stretch + Masking + Denoising)
                 outCanvas.width = INPUT_SIZE;
                 outCanvas.height = INPUT_SIZE;
                 const outImgData = outCtx.createImageData(INPUT_SIZE, INPUT_SIZE);
                 
-                // Find min and max of the ACTUAL output
                 let min = Infinity, max = -Infinity;
                 for (let i = 0; i < outputData.length; i++) {
                     min = Math.min(min, outputData[i]);
@@ -202,23 +201,44 @@
                 }
                 logDebug(`TEED output range: Min=${min.toFixed(4)}, Max=${max.toFixed(4)}, Spread=${(max-min).toFixed(4)}`);
                 
-                // Stretch the contrast so the lowest value is 0 and highest is 1
                 const range = max - min || 1;
-                
                 const binaryMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
-                
-                // Dynamic threshold: since we stretch the range, 0.15 usually works well.
-                // If you want more lines, lower this. If too much noise, raise it.
-                const threshold = 0.15; 
+                const threshold = 0.3; // Raise to 0.4 or 0.5 if you still see too many dots
                 
                 for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
                     const normalized = (outputData[i] - min) / range;
                     binaryMask[i] = normalized > threshold ? 1 : 0;
                 }
 
-                // Morphological Closing (Bridge the gaps)
+                // --- NEW: Apply the Foreground Mask ---
+                // We need to know where the cat is so we can ignore the curtains.
+                // We'll use the same letterboxing math we used for the input.
+                const maskCanvas = document.createElement('canvas');
+                maskCanvas.width = INPUT_SIZE;
+                maskCanvas.height = INPUT_SIZE;
+                const maskCtx = maskCanvas.getContext('2d');
+                
+                const scale = Math.min(INPUT_SIZE / img.width, INPUT_SIZE / img.height);
+                const drawW = img.width * scale;
+                const drawH = img.height * scale;
+                const offsetX = (INPUT_SIZE - drawW) / 2;
+                const offsetY = (INPUT_SIZE - drawH) / 2;
+                
+                maskCtx.drawImage(img, offsetX, offsetY, drawW, drawH);
+                const maskData = maskCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
+
+                // Filter out edges that are outside the foreground
+                for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
+                    // If the alpha channel of the mask is 0 (transparent), it's background.
+                    // Force the edge to 0.
+                    if (maskData[i * 4 + 3] < 10) {
+                        binaryMask[i] = 0;
+                    }
+                }
+
+                // --- Morphological Closing (Bridge the gaps) ---
                 const closedMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
-                const radius = 3; // Checks a 7x7 square
+                const radius = 2; // Lowered to 2 so we don't blob the cat's face together
                 
                 for (let y = 0; y < INPUT_SIZE; y++) {
                     for (let x = 0; x < INPUT_SIZE; x++) {
