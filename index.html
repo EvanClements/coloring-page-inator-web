@@ -197,9 +197,9 @@
                     max = Math.max(max, outputData[i]);
                 }
                 
-                logDebug(`TEED output range: Min=${min.toFixed(6)}, Max=${max.toFixed(6)}`);
+                logDebug(`TEED output range: Min=${min.toFixed(4)}, Max=${max.toFixed(4)}, Spread=${(max-min).toFixed(4)}`);
                 
-                const threshold = 0.5; 
+                const threshold = 0.45; 
                 
                 for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
                     const prob = outputData[i];
