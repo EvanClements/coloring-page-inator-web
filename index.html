@@ -170,7 +170,7 @@
                 filterCanvas.width = INPUT_SIZE;
                 filterCanvas.height = INPUT_SIZE;
                 const filterCtx = filterCanvas.getContext('2d');
-                filterCtx.filter = 'blur(2px)'; // Adjust this (1px to 4px) to control detail
+                filterCtx.filter = 'blur(3px)'; // Adjust this (1px to 4px) to control detail
                 filterCtx.drawImage(tempCanvas, 0, 0);
 
                 const imgData = filterCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
@@ -197,7 +197,7 @@
                 logDebug(`Inference complete. Output tensor type: ${results[outputKey].type}`);
                 logDebug(`Output dims: [${results[outputKey].dims.join(', ')}]`);
 
-                // 4. Post-process (Dynamic Contrast Stretch + Masking + Dilation)
+                // 4. Post-process (Dynamic Contrast Stretch + Masking + Median Filter + Dilation)
                 outCanvas.width = INPUT_SIZE;
                 outCanvas.height = INPUT_SIZE;
                 const outImgData = outCtx.createImageData(INPUT_SIZE, INPUT_SIZE);
@@ -217,7 +217,7 @@
                     binaryMask[i] = normalized > threshold ? 1 : 0;
                 }
 
-                // Apply the Foreground Mask (Strict)
+                // Apply the Foreground Mask
                 const maskCanvas = document.createElement('canvas');
                 maskCanvas.width = INPUT_SIZE;
                 maskCanvas.height = INPUT_SIZE;
@@ -238,13 +238,29 @@
                     }
                 }
 
-                // --- Dilation (Thicken lines) + Speckle Filter ---
-                // This expands the lines by 1 pixel in all directions
+                // --- NEW: Median Filter (Removes speckles/noise) ---
+                const filteredMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
+                for (let y = 1; y < INPUT_SIZE - 1; y++) {
+                    for (let x = 1; x < INPUT_SIZE - 1; x++) {
+                        const i = y * INPUT_SIZE + x;
+                        let sum = 0;
+                        // Check 3x3 neighborhood
+                        for (let dy = -1; dy <= 1; dy++) {
+                            for (let dx = -1; dx <= 1; dx++) {
+                                sum += binaryMask[i + dy * INPUT_SIZE + dx];
+                            }
+                        }
+                        // If the majority of the surrounding pixels are lines (>= 5 out of 9), it's a line.
+                        filteredMask[i] = sum >= 5 ? 1 : 0;
+                    }
+                }
+
+                // --- Dilation (Thicken lines) ---
                 const dilatedMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
                 for (let y = 1; y < INPUT_SIZE - 1; y++) {
                     for (let x = 1; x < INPUT_SIZE - 1; x++) {
                         const i = y * INPUT_SIZE + x;
-                        if (binaryMask[i] === 1) {
+                        if (filteredMask[i] === 1) {
                             dilatedMask[i] = 1;
                             dilatedMask[i - 1] = 1;
                             dilatedMask[i + 1] = 1;
@@ -254,7 +270,7 @@
                     }
                 }
 
-                // Remove any isolated dots that survived
+                // Remove isolated dots
                 const finalMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
                 for (let y = 1; y < INPUT_SIZE - 1; y++) {
                     for (let x = 1; x < INPUT_SIZE - 1; x++) {
@@ -266,7 +282,6 @@
                             if (dilatedMask[i - INPUT_SIZE] === 1) neighbors++;
                             if (dilatedMask[i + INPUT_SIZE] === 1) neighbors++;
                             
-                            // Needs at least 2 neighbors to be considered a line
                             if (neighbors >= 2) {
                                 finalMask[i] = 1;
                             }
