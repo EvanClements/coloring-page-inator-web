@@ -139,41 +139,45 @@
                 fgCtx.drawImage(img, 0, 0);
                 logDebug(`Foreground image size: ${img.width}x${img.height}`);
 
-                // 2. Preprocess for TEED (Resize to 512x512, Normalize)
+                // 2. Preprocess for TEED (Preserve Aspect Ratio, Use Original Image)
                 statusEl.textContent = 'Processing edges with TEED...';
-                logDebug('Preprocessing image for TEED...');
+                logDebug('Preprocessing image for TEED (Letterboxing)...');
                 const INPUT_SIZE = 512;
                 
-                // Create a temporary canvas for resizing
+                // We need the original image for TEED to see the natural contrast
+                const originalImg = await createImageBitmap(uploadedImageBlob);
+                
                 const tempCanvas = document.createElement('canvas');
                 tempCanvas.width = INPUT_SIZE;
                 tempCanvas.height = INPUT_SIZE;
                 const tempCtx = tempCanvas.getContext('2d');
-                tempCtx.drawImage(img, 0, 0, INPUT_SIZE, INPUT_SIZE);
-                tempCtx.globalCompositeOperation = 'destination-over';
+                
+                // Fill with white first
                 tempCtx.fillStyle = '#ffffff';
                 tempCtx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
-                tempCtx.globalCompositeOperation = 'source-over';
+                
+                // Calculate scaling to fit inside 512x512 while preserving aspect ratio
+                const scale = Math.min(INPUT_SIZE / originalImg.width, INPUT_SIZE / originalImg.height);
+                const drawW = originalImg.width * scale;
+                const drawH = originalImg.height * scale;
+                const offsetX = (INPUT_SIZE - drawW) / 2;
+                const offsetY = (INPUT_SIZE - drawH) / 2;
+                
+                tempCtx.drawImage(originalImg, offsetX, offsetY, drawW, drawH);
 
                 const imgData = tempCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
                 
-                // Convert RGBA to CHW float32 array [1, 3, 512, 512]
+                // Convert RGBA to CHW float32 array with ImageNet Normalization
                 const float32Data = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
-
-                // ImageNet normalization constants
                 const mean = [0.485, 0.456, 0.406];
                 const std = [0.229, 0.224, 0.225];
 
                 for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
-                    // Normalize R
                     float32Data[i] = ((imgData[i * 4] / 255.0) - mean[0]) / std[0];
-                    // Normalize G
                     float32Data[INPUT_SIZE * INPUT_SIZE + i] = ((imgData[i * 4 + 1] / 255.0) - mean[1]) / std[1];
-                    // Normalize B
                     float32Data[2 * INPUT_SIZE * INPUT_SIZE + i] = ((imgData[i * 4 + 2] / 255.0) - mean[2]) / std[2];
                 }
-                logDebug('Preprocessing complete. Running inference...');
-                
+
                 // 3. Run TEED Inference
                 const tensor = new ort.Tensor('float32', float32Data, [1, 3, INPUT_SIZE, INPUT_SIZE]);
                 const feeds = {};
@@ -216,7 +220,7 @@
                 // This looks at every pixel. If it's part of a line, it checks its neighbors.
                 // If a background pixel is surrounded by lines, it becomes a line.
                 const closedMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
-                const radius = 3; // Increase this to 3 or 4 if lines are still too broken
+                const radius = 2; // Increase this to 3 or 4 if lines are still too broken
                 
                 for (let y = 0; y < INPUT_SIZE; y++) {
                     for (let x = 0; x < INPUT_SIZE; x++) {
