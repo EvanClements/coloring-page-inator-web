@@ -168,6 +168,12 @@
                 
                 // TEED outputs probabilities (0 to 1). 
                 // We threshold to get crisp lines.
+                let min = Infinity, max = -Infinity;
+for (let i = 0; i < outputData.length; i++) {
+    min = Math.min(min, outputData[i]);
+    max = Math.max(max, outputData[i]);
+}
+console.log('TEED output range:', min, max);
                 const threshold = 0.5; 
                 
                 for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
