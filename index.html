@@ -16,6 +16,14 @@
         .progress-bar { width: 100%; height: 20px; background: #eee; border-radius: 10px; overflow: hidden; margin-top: 8px; }
         .progress-fill { height: 100%; background: #4CAF50; width: 0%; transition: width 0.2s; }
     </style>
+    <script type="importmap">
+{
+  "imports": {
+    "lodash": "https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js",
+    "lodash/": "https://cdn.jsdelivr.net/npm/lodash@4.17.21/"
+  }
+}
+</script>
 </head>
 <body>
     <h1>Background Removal + TEED</h1>
@@ -37,7 +45,7 @@
     <button id="downloadBtn" disabled>Download PNG</button>
 
     <script type="module">
-        import lodashEs from 'https://cdn.jsdelivr.net/npm/lodash-es@4.18.1/+esm';
+        // import lodashEs from 'https://cdn.jsdelivr.net/npm/lodash-es@4.18.1/+esm';
         import { removeBackground } from 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.4.5/dist/index.mjs';
         import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/dist/ort.webgpu.min.js';
 
