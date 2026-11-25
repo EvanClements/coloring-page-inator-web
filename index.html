@@ -219,10 +219,10 @@
                 const maskCtx = maskCanvas.getContext('2d');
                 
                 scale = Math.min(INPUT_SIZE / img.width, INPUT_SIZE / img.height);
-                const drawW = img.width * scale;
-                const drawH = img.height * scale;
-                const offsetX = (INPUT_SIZE - drawW) / 2;
-                const offsetY = (INPUT_SIZE - drawH) / 2;
+                drawW = img.width * scale;
+                drawH = img.height * scale;
+                offsetX = (INPUT_SIZE - drawW) / 2;
+                offsetY = (INPUT_SIZE - drawH) / 2;
                 
                 maskCtx.drawImage(img, offsetX, offsetY, drawW, drawH);
                 const maskData = maskCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
