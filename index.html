@@ -216,7 +216,7 @@
                 // This looks at every pixel. If it's part of a line, it checks its neighbors.
                 // If a background pixel is surrounded by lines, it becomes a line.
                 const closedMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
-                const radius = 2; // Increase this to 3 or 4 if lines are still too broken
+                const radius = 3; // Increase this to 3 or 4 if lines are still too broken
                 
                 for (let y = 0; y < INPUT_SIZE; y++) {
                     for (let x = 0; x < INPUT_SIZE; x++) {
