@@ -170,7 +170,7 @@
                 filterCanvas.width = INPUT_SIZE;
                 filterCanvas.height = INPUT_SIZE;
                 const filterCtx = filterCanvas.getContext('2d');
-                filterCtx.filter = 'blur(2px)'; // Adjust this (1px to 4px) to control detail
+                filterCtx.filter = 'blur(5px)'; // Adjust this (1px to 4px) to control detail
                 filterCtx.drawImage(tempCanvas, 0, 0);
 
                 const imgData = filterCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
@@ -211,7 +211,7 @@
                 const binaryMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
                 
                 // Raise this threshold to remove more of the faint fur lines
-                const threshold = 0.55; 
+                const threshold = 0.65; 
                 
                 for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
                     const normalized = (outputData[i] - min) / range;
@@ -234,7 +234,7 @@
                 const maskData = maskCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
 
                 for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
-                    if (maskData[i * 4 + 3] < 10) {
+                    if (maskData[i * 4 + 3] < 128) {
                         binaryMask[i] = 0;
                     }
                 }
