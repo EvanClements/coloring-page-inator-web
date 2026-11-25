@@ -5,16 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VTracer Coloring Page Test</title>
     <style>
-        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 20px auto; padding: 0 16px; }
+        body { font-family: system-ui, sans-serif; max-width: 960px; margin: 20px auto; padding: 0 16px; }
         h1 { font-size: 1.4rem; }
         #status { color: #666; margin: 12px 0; }
-        .controls { margin: 16px 0; }
+        .controls { margin: 16px 0; padding: 12px; border: 1px solid #ddd; border-radius: 6px; }
+        .control-row { margin: 8px 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .control-row label { min-width: 140px; font-weight: 500; }
+        .control-row input[type="number"] { width: 80px; padding: 4px; }
+        .control-row select { padding: 4px; }
+        .control-row input[type="range"] { width: 160px; }
+        .control-row .val { display: inline-block; min-width: 30px; text-align: right; font-family: monospace; }
         input[type="file"] { margin-bottom: 8px; }
         canvas { border: 1px solid #ddd; max-width: 100%; margin: 8px 0; }
         #svgOutput { border: 1px solid #ddd; margin: 8px 0; min-height: 100px; background: #fafafa; }
         #svgOutput svg { display: block; max-width: 100%; height: auto; }
         button { padding: 6px 14px; cursor: pointer; }
+        button:disabled { opacity: 0.5; cursor: default; }
         .note { font-size: 0.85rem; color: #888; }
+        textarea { width: 100%; font-family: monospace; font-size: 0.85rem; padding: 8px; box-sizing: border-box; }
     </style>
 </head>
 <body>
@@ -23,17 +31,95 @@
 
     <div class="controls">
         <input type="file" id="fileInput" accept="image/*">
-        <br>
-        <button id="traceBtn" disabled>Generate Coloring Page</button>
     </div>
 
-    <p id="status">Ready. Select an image.</p>
+    <div class="controls">
+        <h3 style="margin-top: 0;">VTracer Settings</h3>
+
+        <div class="control-row">
+            <label for="presetSelect">Preset:</label>
+            <select id="presetSelect">
+                <option value="">None (use individual settings)</option>
+                <option value="bw">BW (black & white)</option>
+                <option value="poster">Poster</option>
+                <option value="photo">Photo</option>
+            </select>
+            <span class="note">Preset is applied first, then individual settings override.</span>
+        </div>
+
+        <div class="control-row">
+            <label for="modeSelect">Curve Mode:</label>
+            <select id="modeSelect">
+                <option value="spline">Spline (smooth curves)</option>
+                <option value="polygon">Polygon (straight edges)</option>
+                <option value="pixel">Pixel (blocky)</option>
+            </select>
+        </div>
+
+        <div class="control-row">
+            <label for="colorPrecision">Color Precision (1-8):</label>
+            <input type="range" id="colorPrecision" min="1" max="8" step="1" value="5">
+            <span class="val" id="colorPrecisionVal">5</span>
+            <span class="note">Lower = simpler regions, fewer lines.</span>
+        </div>
+
+        <div class="control-row">
+            <label for="filterSpeckle">Filter Speckle (px):</label>
+            <input type="range" id="filterSpeckle" min="0" max="20" step="1" value="6">
+            <span class="val" id="filterSpeckleVal">6</span>
+            <span class="note">Higher = removes more small noise regions.</span>
+        </div>
+
+        <div class="control-row">
+            <label for="layerDifference">Layer Difference (0-255):</label>
+            <input type="range" id="layerDifference" min="0" max="128" step="1" value="16">
+            <span class="val" id="layerDifferenceVal">16</span>
+            <span class="note">Gradient layering threshold. Higher = fewer layers.</span>
+        </div>
+
+        <div class="control-row">
+            <label for="cornerThreshold">Corner Threshold (deg):</label>
+            <input type="range" id="cornerThreshold" min="0" max="180" step="1" value="60">
+            <span class="val" id="cornerThresholdVal">60</span>
+        </div>
+
+        <div class="control-row">
+            <label for="lengthThreshold">Length Threshold (px):</label>
+            <input type="range" id="lengthThreshold" min="0" max="20" step="0.5" value="4">
+            <span class="val" id="lengthThresholdVal">4</span>
+        </div>
+
+        <div class="control-row">
+            <label for="spliceThreshold">Splice Threshold (deg):</label>
+            <input type="range" id="spliceThreshold" min="0" max="180" step="1" value="45">
+            <span class="val" id="spliceThresholdVal">45</span>
+        </div>
+
+        <div class="control-row">
+            <label for="maxIterations">Max Iterations:</label>
+            <input type="number" id="maxIterations" min="0" max="30" step="1" value="10">
+        </div>
+
+        <div class="control-row">
+            <label for="pathPrecision">Path Precision:</label>
+            <input type="number" id="pathPrecision" min="0" max="6" step="1" value="2">
+            <span class="note">Decimal places for coordinates. Lower = smaller SVG.</span>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="traceBtn" disabled>Generate Coloring Page</button>
+        <span id="status" style="margin-left: 12px;">Ready. Select an image.</span>
+    </div>
 
     <canvas id="previewCanvas" style="display:none;"></canvas>
 
     <h3>Output (Coloring Page SVG)</h3>
     <div id="svgOutput"></div>
     <button id="downloadBtn" disabled>Download SVG</button>
+
+    <h3>Settings Used</h3>
+    <textarea id="settingsLog" rows="8" readonly placeholder="Settings will appear here after generating."></textarea>
 
     <script type="module">
         import * as glue from 'https://cdn.jsdelivr.net/npm/wasm_vtracer@0.2.0/wasm_vtracer_bg.js';
@@ -45,12 +131,44 @@
         const svgOutput = document.getElementById('svgOutput');
         const downloadBtn = document.getElementById('downloadBtn');
         const previewCanvas = document.getElementById('previewCanvas');
+        const settingsLog = document.getElementById('settingsLog');
         const ctx = previewCanvas.getContext('2d', { willReadFrequently: true });
 
         let tracer = null;
         let currentImageData = null;
 
-        // Initialize tracer on first use
+        // Bind slider value displays
+        function bindSlider(id) {
+            const el = document.getElementById(id);
+            const val = document.getElementById(id + 'Val');
+            if (el && val) {
+                el.addEventListener('input', () => { val.textContent = el.value; });
+            }
+        }
+        bindSlider('colorPrecision');
+        bindSlider('filterSpeckle');
+        bindSlider('layerDifference');
+        bindSlider('cornerThreshold');
+        bindSlider('lengthThreshold');
+        bindSlider('spliceThreshold');
+
+        // Read all settings from the UI
+        function readSettings() {
+            const preset = document.getElementById('presetSelect').value || undefined;
+            return {
+                preset: preset,
+                mode: document.getElementById('modeSelect').value,
+                color_precision: parseInt(document.getElementById('colorPrecision').value, 10),
+                filter_speckle: parseInt(document.getElementById('filterSpeckle').value, 10),
+                layer_difference: parseInt(document.getElementById('layerDifference').value, 10),
+                corner_threshold: parseInt(document.getElementById('cornerThreshold').value, 10),
+                length_threshold: parseFloat(document.getElementById('lengthThreshold').value),
+                splice_threshold: parseInt(document.getElementById('spliceThreshold').value, 10),
+                max_iterations: parseInt(document.getElementById('maxIterations').value, 10),
+                path_precision: parseInt(document.getElementById('pathPrecision').value, 10),
+            };
+        }
+
         async function getTracer() {
             if (tracer) return tracer;
             statusEl.textContent = 'Loading VTracer WASM…';
@@ -61,14 +179,12 @@
             return tracer;
         }
 
-        // Load image file into canvas and capture ImageData
         fileInput.addEventListener('change', async (e) => {
             const file = e.target.files[0];
             if (!file) return;
 
             const img = new Image();
             img.onload = () => {
-                // Limit size to keep tracing fast for testing
                 const maxDim = 600;
                 let w = img.width;
                 let h = img.height;
@@ -89,43 +205,39 @@
             img.src = URL.createObjectURL(file);
         });
 
-        // Run tracing and post-process SVG
         traceBtn.addEventListener('click', async () => {
             if (!currentImageData) return;
             traceBtn.disabled = true;
-            statusEl.textContent = 'Tracing… (this may take a few seconds)';
+            statusEl.textContent = 'Tracing…';
+
+            const settings = readSettings();
 
             try {
                 const t = await getTracer();
 
-                // Trace with settings tuned for coloring pages
+                // Build options object, omitting undefined preset
+                const options = { ...settings };
+                if (!options.preset) delete options.preset;
+
                 const result = t.traceScene(
                     currentImageData.data,
                     currentImageData.width,
                     currentImageData.height,
-                    {
-                        // Lower color precision = fewer color regions
-                        color_precision: 5,
-                        // Remove small speckles to reduce noise
-                        filter_speckle: 6,
-                        // Use spline mode for smooth curves
-                        mode: 'spline',
-                    }
+                    options
                 );
 
                 // Post-process: force all fills white, strokes black
                 let svg = result.svg;
-                // Inject style block right after opening <svg>
                 const style = '<style>path { fill: #ffffff !important; stroke: #000000 !important; stroke-width: 1.2; }</style>';
-                // Handle both <svg ...> and <svg>
                 svg = svg.replace(/<svg([^>]*)>/, `<svg$1>${style}`);
 
                 svgOutput.innerHTML = svg;
                 downloadBtn.disabled = false;
-                statusEl.textContent = 'Done. Adjust settings in code if needed, then download.';
-
-                // Store for download
                 window._lastSvg = svg;
+
+                // Log the exact settings used
+                settingsLog.value = JSON.stringify(settings, null, 2);
+                statusEl.textContent = 'Done.';
             } catch (err) {
                 console.error(err);
                 statusEl.textContent = 'Error: ' + err.message;
@@ -134,7 +246,6 @@
             }
         });
 
-        // Download SVG
         downloadBtn.addEventListener('click', () => {
             if (!window._lastSvg) return;
             const blob = new Blob([window._lastSvg], { type: 'image/svg+xml' });
