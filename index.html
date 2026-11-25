@@ -1,92 +1,150 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Coloring Page Inator (Prototype)</title>
-    <script async src="https://docs.opencv.org/4.10.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VTracer Coloring Page Test</title>
     <style>
-        body { font-family: sans-serif; text-align: center; padding: 20px; }
-        canvas { border: 1px solid #ccc; max-width: 100%; margin: 10px; }
-        #status { color: #666; margin: 10px; }
-        #controls { margin: 15px auto; max-width: 480px; text-align: left; }
-        .slider-row { margin: 8px 0; }
-        .slider-row label { display: inline-block; width: 150px; }
-        .slider-row input[type="range"] { width: 200px; vertical-align: middle; }
-        .slider-row span { display: inline-block; width: 40px; text-align: right; }
-        .hidden { display: none; }
+        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 20px auto; padding: 0 16px; }
+        h1 { font-size: 1.4rem; }
+        #status { color: #666; margin: 12px 0; }
+        .controls { margin: 16px 0; }
+        input[type="file"] { margin-bottom: 8px; }
+        canvas { border: 1px solid #ddd; max-width: 100%; margin: 8px 0; }
+        #svgOutput { border: 1px solid #ddd; margin: 8px 0; min-height: 100px; background: #fafafa; }
+        #svgOutput svg { display: block; max-width: 100%; height: auto; }
+        button { padding: 6px 14px; cursor: pointer; }
+        .note { font-size: 0.85rem; color: #888; }
     </style>
 </head>
 <body>
-    <h2>Photo to Coloring Page</h2>
-    <p id="status">Loading OpenCV.js...</p>
+    <h1>VTracer Coloring Page Test</h1>
+    <p class="note">Image never leaves your browser. Output is an SVG with white fills and black strokes.</p>
 
-    <input type="file" id="fileInput" accept="image/*">
-    <br>
-
-    <canvas id="canvasInput" style="display:none;"></canvas>
-    <canvas id="canvasOutput"></canvas>
-    <br>
-
-    <button id="downloadBtn" disabled>Download Coloring Page</button>
-
-    <div id="controls">
-        <div class="slider-row">
-            <label for="methodSelect">Method:</label>
-            <select id="methodSelect">
-                <option value="adaptive">Adaptive Threshold</option>
-                <option value="canny">Canny Edge</option>
-                <option value="region">Region Boundary (k-means)</option>
-            </select>
-        </div>
-
-        <div id="adaptiveControls">
-            <div class="slider-row">
-                <label for="blockSize">Block Size:</label>
-                <input type="range" id="blockSize" min="3" max="51" step="2" value="21">
-                <span id="blockSizeVal">21</span>
-            </div>
-            <div class="slider-row">
-                <label for="cValue">C:</label>
-                <input type="range" id="cValue" min="0" max="20" step="1" value="8">
-                <span id="cValueVal">8</span>
-            </div>
-        </div>
-
-        <div id="cannyControls" class="hidden">
-            <div class="slider-row">
-                <label for="cannyLow">Low Threshold:</label>
-                <input type="range" id="cannyLow" min="0" max="255" step="1" value="50">
-                <span id="cannyLowVal">50</span>
-            </div>
-            <div class="slider-row">
-                <label for="cannyHigh">High Threshold:</label>
-                <input type="range" id="cannyHigh" min="0" max="255" step="1" value="150">
-                <span id="cannyHighVal">150</span>
-            </div>
-        </div>
-
-        <div id="regionControls" class="hidden">
-            <div class="slider-row">
-                <label for="numColors">Color Bands:</label>
-                <input type="range" id="numColors" min="3" max="12" step="1" value="6">
-                <span id="numColorsVal">6</span>
-            </div>
-            <div class="slider-row">
-                <label for="bilateralPasses">Bilateral Passes:</label>
-                <input type="range" id="bilateralPasses" min="1" max="3" step="1" value="2">
-                <span id="bilateralPassesVal">2</span>
-            </div>
-            <div class="slider-row">
-                <label for="minRegionArea">Min Region %:</label>
-                <input type="range" id="minRegionArea" min="0" max="1" step="0.05" value="0.3">
-                <span id="minRegionAreaVal">0.3</span>
-            </div>
-        </div>
-
-        <div class="slider-row">
-            <button id="reprocessBtn" disabled>Re-process</button>
-        </div>
+    <div class="controls">
+        <input type="file" id="fileInput" accept="image/*">
+        <br>
+        <button id="traceBtn" disabled>Generate Coloring Page</button>
     </div>
 
-    <script src="app.js"></script>
+    <p id="status">Ready. Select an image.</p>
+
+    <canvas id="previewCanvas" style="display:none;"></canvas>
+
+    <h3>Output (Coloring Page SVG)</h3>
+    <div id="svgOutput"></div>
+    <button id="downloadBtn" disabled>Download SVG</button>
+
+    <script type="module">
+        import * as glue from 'https://cdn.jsdelivr.net/npm/wasm_vtracer@0.2.0/wasm_vtracer_bg.js';
+        import { initTracer } from 'https://cdn.jsdelivr.net/npm/@ybelik/scene-tracer@0.1.0/scene-tracer.js';
+
+        const fileInput = document.getElementById('fileInput');
+        const traceBtn = document.getElementById('traceBtn');
+        const statusEl = document.getElementById('status');
+        const svgOutput = document.getElementById('svgOutput');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const previewCanvas = document.getElementById('previewCanvas');
+        const ctx = previewCanvas.getContext('2d', { willReadFrequently: true });
+
+        let tracer = null;
+        let currentImageData = null;
+
+        // Initialize tracer on first use
+        async function getTracer() {
+            if (tracer) return tracer;
+            statusEl.textContent = 'Loading VTracer WASM…';
+            tracer = await initTracer({
+                glue,
+                wasm: 'https://cdn.jsdelivr.net/npm/wasm_vtracer@0.2.0/wasm_vtracer_bg.wasm',
+            });
+            return tracer;
+        }
+
+        // Load image file into canvas and capture ImageData
+        fileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const img = new Image();
+            img.onload = () => {
+                // Limit size to keep tracing fast for testing
+                const maxDim = 600;
+                let w = img.width;
+                let h = img.height;
+                if (w > maxDim || h > maxDim) {
+                    const scale = maxDim / Math.max(w, h);
+                    w = Math.round(w * scale);
+                    h = Math.round(h * scale);
+                }
+                previewCanvas.width = w;
+                previewCanvas.height = h;
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, w, h);
+                ctx.drawImage(img, 0, 0, w, h);
+                currentImageData = ctx.getImageData(0, 0, w, h);
+                traceBtn.disabled = false;
+                statusEl.textContent = `Image loaded (${w}×${h}). Click "Generate Coloring Page".`;
+            };
+            img.src = URL.createObjectURL(file);
+        });
+
+        // Run tracing and post-process SVG
+        traceBtn.addEventListener('click', async () => {
+            if (!currentImageData) return;
+            traceBtn.disabled = true;
+            statusEl.textContent = 'Tracing… (this may take a few seconds)';
+
+            try {
+                const t = await getTracer();
+
+                // Trace with settings tuned for coloring pages
+                const result = t.traceScene(
+                    currentImageData.data,
+                    currentImageData.width,
+                    currentImageData.height,
+                    {
+                        // Lower color precision = fewer color regions
+                        color_precision: 5,
+                        // Remove small speckles to reduce noise
+                        filter_speckle: 6,
+                        // Use spline mode for smooth curves
+                        mode: 'spline',
+                    }
+                );
+
+                // Post-process: force all fills white, strokes black
+                let svg = result.svg;
+                // Inject style block right after opening <svg>
+                const style = '<style>path { fill: #ffffff !important; stroke: #000000 !important; stroke-width: 1.2; }</style>';
+                // Handle both <svg ...> and <svg>
+                svg = svg.replace(/<svg([^>]*)>/, `<svg$1>${style}`);
+
+                svgOutput.innerHTML = svg;
+                downloadBtn.disabled = false;
+                statusEl.textContent = 'Done. Adjust settings in code if needed, then download.';
+
+                // Store for download
+                window._lastSvg = svg;
+            } catch (err) {
+                console.error(err);
+                statusEl.textContent = 'Error: ' + err.message;
+            } finally {
+                traceBtn.disabled = false;
+            }
+        });
+
+        // Download SVG
+        downloadBtn.addEventListener('click', () => {
+            if (!window._lastSvg) return;
+            const blob = new Blob([window._lastSvg], { type: 'image/svg+xml' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'coloring-page.svg';
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+    </script>
 </body>
 </html>
