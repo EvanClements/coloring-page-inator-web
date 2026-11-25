@@ -170,7 +170,7 @@
                 filterCanvas.width = INPUT_SIZE;
                 filterCanvas.height = INPUT_SIZE;
                 const filterCtx = filterCanvas.getContext('2d');
-                filterCtx.filter = 'blur(3px)'; // Adjust this (1px to 4px) to control detail
+                // filterCtx.filter = 'blur(3px)'; // Adjust this (1px to 4px) to control detail
                 filterCtx.drawImage(tempCanvas, 0, 0);
 
                 const imgData = filterCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
