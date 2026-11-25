@@ -218,13 +218,13 @@
                 maskCanvas.height = INPUT_SIZE;
                 const maskCtx = maskCanvas.getContext('2d');
                 
-                scale = Math.min(INPUT_SIZE / img.width, INPUT_SIZE / img.height);
-                drawW = img.width * scale;
-                drawH = img.height * scale;
-                offsetX = (INPUT_SIZE - drawW) / 2;
-                offsetY = (INPUT_SIZE - drawH) / 2;
+                const outScale = Math.min(INPUT_SIZE / img.width, INPUT_SIZE / img.height);
+                const outDrawW = img.width * scale;
+                const outDrawH = img.height * scale;
+                const outOffsetX = (INPUT_SIZE - drawW) / 2;
+                const outOffsetY = (INPUT_SIZE - drawH) / 2;
                 
-                maskCtx.drawImage(img, offsetX, offsetY, drawW, drawH);
+                maskCtx.drawImage(img, outOffsetX, outOffsetY, outDrawW, outDrawH);
                 const maskData = maskCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
 
                 // Filter out edges that are outside the foreground
