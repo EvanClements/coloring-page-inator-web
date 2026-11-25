@@ -218,7 +218,7 @@
                 maskCanvas.height = INPUT_SIZE;
                 const maskCtx = maskCanvas.getContext('2d');
                 
-                const scale = Math.min(INPUT_SIZE / img.width, INPUT_SIZE / img.height);
+                scale = Math.min(INPUT_SIZE / img.width, INPUT_SIZE / img.height);
                 const drawW = img.width * scale;
                 const drawH = img.height * scale;
                 const offsetX = (INPUT_SIZE - drawW) / 2;
