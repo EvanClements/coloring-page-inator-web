@@ -3,258 +3,197 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>VTracer Coloring Page Test</title>
+    <title>Background Removal + TEED Coloring Page</title>
     <style>
-        body { font-family: system-ui, sans-serif; max-width: 960px; margin: 20px auto; padding: 0 16px; }
+        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 20px auto; padding: 0 16px; }
         h1 { font-size: 1.4rem; }
-        #status { color: #666; margin: 12px 0; }
+        #status { color: #666; margin: 12px 0; font-weight: bold; }
         .controls { margin: 16px 0; padding: 12px; border: 1px solid #ddd; border-radius: 6px; }
-        .control-row { margin: 8px 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-        .control-row label { min-width: 140px; font-weight: 500; }
-        .control-row input[type="number"] { width: 80px; padding: 4px; }
-        .control-row select { padding: 4px; }
-        .control-row input[type="range"] { width: 160px; }
-        .control-row .val { display: inline-block; min-width: 30px; text-align: right; font-family: monospace; }
-        input[type="file"] { margin-bottom: 8px; }
-        canvas { border: 1px solid #ddd; max-width: 100%; margin: 8px 0; }
-        #svgOutput { border: 1px solid #ddd; margin: 8px 0; min-height: 100px; background: #fafafa; }
-        #svgOutput svg { display: block; max-width: 100%; height: auto; }
-        button { padding: 6px 14px; cursor: pointer; }
+        canvas { border: 1px solid #ddd; max-width: 100%; margin: 8px 0; background: #fafafa; }
+        button { padding: 8px 16px; cursor: pointer; font-size: 1rem; }
         button:disabled { opacity: 0.5; cursor: default; }
-        .note { font-size: 0.85rem; color: #888; }
-        textarea { width: 100%; font-family: monospace; font-size: 0.85rem; padding: 8px; box-sizing: border-box; }
+        .hidden { display: none; }
+        .progress-bar { width: 100%; height: 20px; background: #eee; border-radius: 10px; overflow: hidden; margin-top: 8px; }
+        .progress-fill { height: 100%; background: #4CAF50; width: 0%; transition: width 0.2s; }
     </style>
 </head>
 <body>
-    <h1>VTracer Coloring Page Test</h1>
-    <p class="note">Image never leaves your browser. Output is an SVG with white fills and black strokes.</p>
-
+    <h1>Background Removal + TEED</h1>
+    
     <div class="controls">
         <input type="file" id="fileInput" accept="image/*">
-    </div>
-
-    <div class="controls">
-        <h3 style="margin-top: 0;">VTracer Settings</h3>
-
-        <div class="control-row">
-            <label for="presetSelect">Preset:</label>
-            <select id="presetSelect">
-                <option value="">None (use individual settings)</option>
-                <option value="bw">BW (black & white)</option>
-                <option value="poster">Poster</option>
-                <option value="photo">Photo</option>
-            </select>
-            <span class="note">Preset is applied first, then individual settings override.</span>
-        </div>
-
-        <div class="control-row">
-            <label for="modeSelect">Curve Mode:</label>
-            <select id="modeSelect">
-                <option value="spline">Spline (smooth curves)</option>
-                <option value="polygon">Polygon (straight edges)</option>
-                <option value="pixel">Pixel (blocky)</option>
-            </select>
-        </div>
-
-        <div class="control-row">
-            <label for="colorPrecision">Color Precision (1-8):</label>
-            <input type="range" id="colorPrecision" min="1" max="8" step="1" value="5">
-            <span class="val" id="colorPrecisionVal">5</span>
-            <span class="note">Lower = simpler regions, fewer lines.</span>
-        </div>
-
-        <div class="control-row">
-            <label for="filterSpeckle">Filter Speckle (px):</label>
-            <input type="range" id="filterSpeckle" min="0" max="20" step="1" value="6">
-            <span class="val" id="filterSpeckleVal">6</span>
-            <span class="note">Higher = removes more small noise regions.</span>
-        </div>
-
-        <div class="control-row">
-            <label for="layerDifference">Layer Difference (0-255):</label>
-            <input type="range" id="layerDifference" min="0" max="128" step="1" value="16">
-            <span class="val" id="layerDifferenceVal">16</span>
-            <span class="note">Gradient layering threshold. Higher = fewer layers.</span>
-        </div>
-
-        <div class="control-row">
-            <label for="cornerThreshold">Corner Threshold (deg):</label>
-            <input type="range" id="cornerThreshold" min="0" max="180" step="1" value="60">
-            <span class="val" id="cornerThresholdVal">60</span>
-        </div>
-
-        <div class="control-row">
-            <label for="lengthThreshold">Length Threshold (px):</label>
-            <input type="range" id="lengthThreshold" min="0" max="20" step="0.5" value="4">
-            <span class="val" id="lengthThresholdVal">4</span>
-        </div>
-
-        <div class="control-row">
-            <label for="spliceThreshold">Splice Threshold (deg):</label>
-            <input type="range" id="spliceThreshold" min="0" max="180" step="1" value="45">
-            <span class="val" id="spliceThresholdVal">45</span>
-        </div>
-
-        <div class="control-row">
-            <label for="maxIterations">Max Iterations:</label>
-            <input type="number" id="maxIterations" min="0" max="30" step="1" value="10">
-        </div>
-
-        <div class="control-row">
-            <label for="pathPrecision">Path Precision:</label>
-            <input type="number" id="pathPrecision" min="0" max="6" step="1" value="2">
-            <span class="note">Decimal places for coordinates. Lower = smaller SVG.</span>
+        <button id="processBtn" disabled>Generate Coloring Page</button>
+        <p id="status">Select an image to begin.</p>
+        <div class="progress-bar hidden" id="progressContainer">
+            <div class="progress-fill" id="progressFill"></div>
         </div>
     </div>
 
-    <div class="controls">
-        <button id="traceBtn" disabled>Generate Coloring Page</button>
-        <span id="status" style="margin-left: 12px;">Ready. Select an image.</span>
-    </div>
+    <h3>1. Foreground (Background Removed)</h3>
+    <canvas id="foregroundCanvas"></canvas>
 
-    <canvas id="previewCanvas" style="display:none;"></canvas>
-
-    <h3>Output (Coloring Page SVG)</h3>
-    <div id="svgOutput"></div>
-    <button id="downloadBtn" disabled>Download SVG</button>
-
-    <h3>Settings Used</h3>
-    <textarea id="settingsLog" rows="8" readonly placeholder="Settings will appear here after generating."></textarea>
+    <h3>2. TEED Edge Output (Coloring Page)</h3>
+    <canvas id="outputCanvas"></canvas>
+    <button id="downloadBtn" disabled>Download PNG</button>
 
     <script type="module">
-        import * as glue from 'https://cdn.jsdelivr.net/npm/wasm_vtracer@0.2.0/wasm_vtracer_bg.js';
-        import { initTracer } from 'https://cdn.jsdelivr.net/npm/@ybelik/scene-tracer@0.1.0/scene-tracer.js';
+        import { removeBackground } from 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.4.5/dist/index.mjs';
+        import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/dist/ort.webgpu.min.js';
 
+        // --- DOM Elements ---
         const fileInput = document.getElementById('fileInput');
-        const traceBtn = document.getElementById('traceBtn');
+        const processBtn = document.getElementById('processBtn');
         const statusEl = document.getElementById('status');
-        const svgOutput = document.getElementById('svgOutput');
+        const fgCanvas = document.getElementById('foregroundCanvas');
+        const outCanvas = document.getElementById('outputCanvas');
         const downloadBtn = document.getElementById('downloadBtn');
-        const previewCanvas = document.getElementById('previewCanvas');
-        const settingsLog = document.getElementById('settingsLog');
-        const ctx = previewCanvas.getContext('2d', { willReadFrequently: true });
+        const progressContainer = document.getElementById('progressContainer');
+        const progressFill = document.getElementById('progressFill');
 
-        let tracer = null;
-        let currentImageData = null;
+        const fgCtx = fgCanvas.getContext('2d');
+        const outCtx = outCanvas.getContext('2d');
 
-        // Bind slider value displays
-        function bindSlider(id) {
-            const el = document.getElementById(id);
-            const val = document.getElementById(id + 'Val');
-            if (el && val) {
-                el.addEventListener('input', () => { val.textContent = el.value; });
+        let uploadedImageBlob = null;
+        let session = null;
+
+        // --- Initialization ---
+        async function initONNX() {
+            try {
+                statusEl.textContent = 'Loading TEED ONNX model...';
+                
+                // Use WebGPU if available, fallback to WASM
+                ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/dist/';
+                session = await ort.InferenceSession.create('./models/teed.onnx', {
+                    executionProviders: ['webgpu', 'wasm'],
+                    graphOptimizationLevel: 'all'
+                });
+                console.log('ONNX Session loaded. Inputs:', session.inputNames, 'Outputs:', session.outputNames);
+                
+                statusEl.textContent = 'Models ready. Select an image.';
+            } catch (e) {
+                console.error(e);
+                statusEl.textContent = 'Error loading ONNX model. Check console.';
             }
         }
-        bindSlider('colorPrecision');
-        bindSlider('filterSpeckle');
-        bindSlider('layerDifference');
-        bindSlider('cornerThreshold');
-        bindSlider('lengthThreshold');
-        bindSlider('spliceThreshold');
 
-        // Read all settings from the UI
-        function readSettings() {
-            const preset = document.getElementById('presetSelect').value || undefined;
-            return {
-                preset: preset,
-                mode: document.getElementById('modeSelect').value,
-                color_precision: parseInt(document.getElementById('colorPrecision').value, 10),
-                filter_speckle: parseInt(document.getElementById('filterSpeckle').value, 10),
-                layer_difference: parseInt(document.getElementById('layerDifference').value, 10),
-                corner_threshold: parseInt(document.getElementById('cornerThreshold').value, 10),
-                length_threshold: parseFloat(document.getElementById('lengthThreshold').value),
-                splice_threshold: parseInt(document.getElementById('spliceThreshold').value, 10),
-                max_iterations: parseInt(document.getElementById('maxIterations').value, 10),
-                path_precision: parseInt(document.getElementById('pathPrecision').value, 10),
-            };
-        }
+        initONNX();
 
-        async function getTracer() {
-            if (tracer) return tracer;
-            statusEl.textContent = 'Loading VTracer WASM…';
-            tracer = await initTracer({
-                glue,
-                wasm: 'https://cdn.jsdelivr.net/npm/wasm_vtracer@0.2.0/wasm_vtracer_bg.wasm',
-            });
-            return tracer;
-        }
-
-        fileInput.addEventListener('change', async (e) => {
+        // --- File Upload ---
+        fileInput.addEventListener('change', (e) => {
             const file = e.target.files[0];
             if (!file) return;
-
-            const img = new Image();
-            img.onload = () => {
-                const maxDim = 600;
-                let w = img.width;
-                let h = img.height;
-                if (w > maxDim || h > maxDim) {
-                    const scale = maxDim / Math.max(w, h);
-                    w = Math.round(w * scale);
-                    h = Math.round(h * scale);
-                }
-                previewCanvas.width = w;
-                previewCanvas.height = h;
-                ctx.fillStyle = '#ffffff';
-                ctx.fillRect(0, 0, w, h);
-                ctx.drawImage(img, 0, 0, w, h);
-                currentImageData = ctx.getImageData(0, 0, w, h);
-                traceBtn.disabled = false;
-                statusEl.textContent = `Image loaded (${w}×${h}). Click "Generate Coloring Page".`;
-            };
-            img.src = URL.createObjectURL(file);
+            uploadedImageBlob = file;
+            processBtn.disabled = false;
+            statusEl.textContent = 'Image loaded. Click Generate.';
         });
 
-        traceBtn.addEventListener('click', async () => {
-            if (!currentImageData) return;
-            traceBtn.disabled = true;
-            statusEl.textContent = 'Tracing…';
-
-            const settings = readSettings();
+        // --- Main Pipeline ---
+        processBtn.addEventListener('click', async () => {
+            if (!uploadedImageBlob || !session) return;
+            
+            processBtn.disabled = true;
+            downloadBtn.disabled = true;
+            progressContainer.classList.remove('hidden');
+            progressFill.style.width = '0%';
 
             try {
-                const t = await getTracer();
+                // 1. Background Removal
+                statusEl.textContent = 'Removing background... (Downloading model on first run)';
+                const fgBlob = await removeBackground(uploadedImageBlob, {
+                    progress: (key, current, total) => {
+                        const pct = Math.round((current / total) * 100);
+                        progressFill.style.width = `${pct}%`;
+                    }
+                });
+                progressFill.style.width = '100%';
 
-                // Build options object, omitting undefined preset
-                const options = { ...settings };
-                if (!options.preset) delete options.preset;
+                // Draw foreground to canvas to composite on white
+                const img = await createImageBitmap(fgBlob);
+                fgCanvas.width = img.width;
+                fgCanvas.height = img.height;
+                
+                // Composite on white
+                fgCtx.fillStyle = '#ffffff';
+                fgCtx.fillRect(0, 0, fgCanvas.width, fgCanvas.height);
+                fgCtx.drawImage(img, 0, 0);
 
-                const result = t.traceScene(
-                    currentImageData.data,
-                    currentImageData.width,
-                    currentImageData.height,
-                    options
-                );
+                // 2. Preprocess for TEED (Resize to 512x512, Normalize)
+                statusEl.textContent = 'Processing edges with TEED...';
+                const INPUT_SIZE = 512;
+                
+                // Create a temporary canvas for resizing
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = INPUT_SIZE;
+                tempCanvas.height = INPUT_SIZE;
+                const tempCtx = tempCanvas.getContext('2d');
+                tempCtx.drawImage(img, 0, 0, INPUT_SIZE, INPUT_SIZE); // Draw transparent img onto 512x512
+                // We need to fill white first so transparent background doesn't become black
+                tempCtx.globalCompositeOperation = 'destination-over';
+                tempCtx.fillStyle = '#ffffff';
+                tempCtx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
+                tempCtx.globalCompositeOperation = 'source-over'; // Reset
 
-                // Post-process: force all fills white, strokes black
-                let svg = result.svg;
-                const style = '<style>path { fill: #ffffff !important; stroke: #000000 !important; stroke-width: 1.2; }</style>';
-                svg = svg.replace(/<svg([^>]*)>/, `<svg$1>${style}`);
+                const imgData = tempCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
+                
+                // Convert RGBA to CHW float32 array [1, 3, 512, 512]
+                const float32Data = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
+                for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
+                    float32Data[i] = imgData[i * 4] / 255.0;                     // R
+                    float32Data[INPUT_SIZE * INPUT_SIZE + i] = imgData[i * 4 + 1] / 255.0; // G
+                    float32Data[2 * INPUT_SIZE * INPUT_SIZE + i] = imgData[i * 4 + 2] / 255.0; // B
+                }
 
-                svgOutput.innerHTML = svg;
+                // 3. Run TEED Inference
+                const tensor = new ort.Tensor('float32', float32Data, [1, 3, INPUT_SIZE, INPUT_SIZE]);
+                const feeds = {};
+                feeds[session.inputNames[0]] = tensor; // Use dynamic input name
+                
+                const results = await session.run(feeds);
+                const outputKey = session.outputNames[0];
+                const outputData = results[outputKey].data;
+
+                // 4. Post-process (Threshold and Invert)
+                outCanvas.width = INPUT_SIZE;
+                outCanvas.height = INPUT_SIZE;
+                const outImgData = outCtx.createImageData(INPUT_SIZE, INPUT_SIZE);
+                
+                // TEED outputs probabilities (0 to 1). 
+                // We threshold to get crisp lines.
+                const threshold = 0.5; 
+                
+                for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
+                    const prob = outputData[i]; // Single channel output
+                    
+                    // If prob > threshold, it's an edge (make it black). 
+                    // Otherwise, it's background (make it white).
+                    const color = prob > threshold ? 0 : 255;
+                    
+                    outImgData.data[i * 4] = color;     // R
+                    outImgData.data[i * 4 + 1] = color; // G
+                    outImgData.data[i * 4 + 2] = color; // B
+                    outImgData.data[i * 4 + 3] = 255;   // A
+                }
+                
+                outCtx.putImageData(outImgData, 0, 0);
+                
+                statusEl.textContent = 'Done!';
                 downloadBtn.disabled = false;
-                window._lastSvg = svg;
 
-                // Log the exact settings used
-                settingsLog.value = JSON.stringify(settings, null, 2);
-                statusEl.textContent = 'Done.';
             } catch (err) {
                 console.error(err);
                 statusEl.textContent = 'Error: ' + err.message;
             } finally {
-                traceBtn.disabled = false;
+                processBtn.disabled = false;
+                progressContainer.classList.add('hidden');
             }
         });
 
+        // --- Download ---
         downloadBtn.addEventListener('click', () => {
-            if (!window._lastSvg) return;
-            const blob = new Blob([window._lastSvg], { type: 'image/svg+xml' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'coloring-page.svg';
-            a.click();
-            URL.revokeObjectURL(url);
+            const link = document.createElement('a');
+            link.download = 'coloring-page.png';
+            link.href = outCanvas.toDataURL('image/png');
+            link.click();
         });
     </script>
 </body>
