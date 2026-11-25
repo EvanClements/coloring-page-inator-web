@@ -15,16 +15,8 @@
         .hidden { display: none; }
         .progress-bar { width: 100%; height: 20px; background: #eee; border-radius: 10px; overflow: hidden; margin-top: 8px; }
         .progress-fill { height: 100%; background: #4CAF50; width: 0%; transition: width 0.2s; }
+        textarea { width: 100%; height: 150px; font-family: monospace; font-size: 12px; padding: 8px; box-sizing: border-box; background: #f5f5f5; border: 1px solid #ccc; }
     </style>
-    <!-- 
-    <script type="importmap">
-{
-  "imports": {
-    "lodash": "https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js",
-    "lodash/": "https://cdn.jsdelivr.net/npm/lodash@4.17.21/"
-  }
-}
-</script> -->
 </head>
 <body>
     <h1>Background Removal + TEED</h1>
@@ -45,6 +37,9 @@
     <canvas id="outputCanvas"></canvas>
     <button id="downloadBtn" disabled>Download PNG</button>
 
+    <h3>Debug Log</h3>
+    <textarea id="debugLog" readonly placeholder="Debug information will appear here..."></textarea>
+
     <script type="module">
         import { removeBackground } from 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/+esm';
         import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/+esm';
@@ -58,6 +53,7 @@
         const downloadBtn = document.getElementById('downloadBtn');
         const progressContainer = document.getElementById('progressContainer');
         const progressFill = document.getElementById('progressFill');
+        const debugLog = document.getElementById('debugLog');
 
         const fgCtx = fgCanvas.getContext('2d');
         const outCtx = outCanvas.getContext('2d');
@@ -65,23 +61,34 @@
         let uploadedImageBlob = null;
         let session = null;
 
+        // --- Debug Helper ---
+        function logDebug(msg) {
+            console.log(msg);
+            debugLog.value += msg + '\n';
+            debugLog.scrollTop = debugLog.scrollHeight; // Auto-scroll to bottom
+        }
+
         // --- Initialization ---
         async function initONNX() {
             try {
                 statusEl.textContent = 'Loading TEED ONNX model...';
+                logDebug('Initializing ONNX Runtime...');
                 
-                // Use WebGPU if available, fallback to WASM
                 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/dist/';
                 session = await ort.InferenceSession.create('./models/teed.onnx', {
                     executionProviders: ['webgpu', 'wasm'],
                     graphOptimizationLevel: 'all'
                 });
-                console.log('ONNX Session loaded. Inputs:', session.inputNames, 'Outputs:', session.outputNames);
+                
+                logDebug(`ONNX Session loaded successfully.`);
+                logDebug(`Input Names: ${session.inputNames.join(', ')}`);
+                logDebug(`Output Names: ${session.outputNames.join(', ')}`);
                 
                 statusEl.textContent = 'Models ready. Select an image.';
             } catch (e) {
                 console.error(e);
-                statusEl.textContent = 'Error loading ONNX model. Check console.';
+                logDebug(`Error loading ONNX model: ${e.message}`);
+                statusEl.textContent = 'Error loading ONNX model. Check debug log.';
             }
         }
 
@@ -94,6 +101,7 @@
             uploadedImageBlob = file;
             processBtn.disabled = false;
             statusEl.textContent = 'Image loaded. Click Generate.';
+            debugLog.value = ''; // Clear previous logs
         });
 
         // --- Main Pipeline ---
@@ -104,10 +112,13 @@
             downloadBtn.disabled = true;
             progressContainer.classList.remove('hidden');
             progressFill.style.width = '0%';
+            debugLog.value = ''; // Reset log for new run
 
             try {
                 // 1. Background Removal
-                statusEl.textContent = 'Removing background... (Downloading model on first run)';
+                statusEl.textContent = 'Removing background...';
+                logDebug('Starting background removal...');
+                
                 const fgBlob = await removeBackground(uploadedImageBlob, {
                     progress: (key, current, total) => {
                         const pct = Math.round((current / total) * 100);
@@ -115,6 +126,7 @@
                     }
                 });
                 progressFill.style.width = '100%';
+                logDebug('Background removal complete.');
 
                 // Draw foreground to canvas to composite on white
                 const img = await createImageBitmap(fgBlob);
@@ -125,9 +137,11 @@
                 fgCtx.fillStyle = '#ffffff';
                 fgCtx.fillRect(0, 0, fgCanvas.width, fgCanvas.height);
                 fgCtx.drawImage(img, 0, 0);
+                logDebug(`Foreground image size: ${img.width}x${img.height}`);
 
                 // 2. Preprocess for TEED (Resize to 512x512, Normalize)
                 statusEl.textContent = 'Processing edges with TEED...';
+                logDebug('Preprocessing image for TEED...');
                 const INPUT_SIZE = 512;
                 
                 // Create a temporary canvas for resizing
@@ -135,12 +149,11 @@
                 tempCanvas.width = INPUT_SIZE;
                 tempCanvas.height = INPUT_SIZE;
                 const tempCtx = tempCanvas.getContext('2d');
-                tempCtx.drawImage(img, 0, 0, INPUT_SIZE, INPUT_SIZE); // Draw transparent img onto 512x512
-                // We need to fill white first so transparent background doesn't become black
+                tempCtx.drawImage(img, 0, 0, INPUT_SIZE, INPUT_SIZE);
                 tempCtx.globalCompositeOperation = 'destination-over';
                 tempCtx.fillStyle = '#ffffff';
                 tempCtx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
-                tempCtx.globalCompositeOperation = 'source-over'; // Reset
+                tempCtx.globalCompositeOperation = 'source-over';
 
                 const imgData = tempCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
                 
@@ -151,36 +164,37 @@
                     float32Data[INPUT_SIZE * INPUT_SIZE + i] = imgData[i * 4 + 1] / 255.0; // G
                     float32Data[2 * INPUT_SIZE * INPUT_SIZE + i] = imgData[i * 4 + 2] / 255.0; // B
                 }
+                logDebug('Preprocessing complete. Running inference...');
 
                 // 3. Run TEED Inference
                 const tensor = new ort.Tensor('float32', float32Data, [1, 3, INPUT_SIZE, INPUT_SIZE]);
                 const feeds = {};
-                feeds[session.inputNames[0]] = tensor; // Use dynamic input name
+                feeds[session.inputNames[0]] = tensor;
                 
                 const results = await session.run(feeds);
                 const outputKey = session.outputNames[0];
                 const outputData = results[outputKey].data;
+                
+                logDebug(`Inference complete. Output tensor type: ${results[outputKey].type}`);
+                logDebug(`Output dims: [${results[outputKey].dims.join(', ')}]`);
 
                 // 4. Post-process (Threshold and Invert)
                 outCanvas.width = INPUT_SIZE;
                 outCanvas.height = INPUT_SIZE;
                 const outImgData = outCtx.createImageData(INPUT_SIZE, INPUT_SIZE);
                 
-                // TEED outputs probabilities (0 to 1). 
-                // We threshold to get crisp lines.
                 let min = Infinity, max = -Infinity;
-for (let i = 0; i < outputData.length; i++) {
-    min = Math.min(min, outputData[i]);
-    max = Math.max(max, outputData[i]);
-}
-console.log('TEED output range:', min, max);
+                for (let i = 0; i < outputData.length; i++) {
+                    min = Math.min(min, outputData[i]);
+                    max = Math.max(max, outputData[i]);
+                }
+                
+                logDebug(`TEED output range: Min=${min.toFixed(6)}, Max=${max.toFixed(6)}`);
+                
                 const threshold = 0.5; 
                 
                 for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
-                    const prob = outputData[i]; // Single channel output
-                    
-                    // If prob > threshold, it's an edge (make it black). 
-                    // Otherwise, it's background (make it white).
+                    const prob = outputData[i];
                     const color = prob > threshold ? 0 : 255;
                     
                     outImgData.data[i * 4] = color;     // R
@@ -191,11 +205,13 @@ console.log('TEED output range:', min, max);
                 
                 outCtx.putImageData(outImgData, 0, 0);
                 
+                logDebug('Rendering complete.');
                 statusEl.textContent = 'Done!';
                 downloadBtn.disabled = false;
 
             } catch (err) {
                 console.error(err);
+                logDebug(`Pipeline Error: ${err.message}`);
                 statusEl.textContent = 'Error: ' + err.message;
             } finally {
                 processBtn.disabled = false;
