@@ -165,7 +165,15 @@
                 
                 tempCtx.drawImage(originalImg, offsetX, offsetY, drawW, drawH);
 
-                const imgData = tempCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
+                // --- NEW: Blur out texture, keep edges ---
+                const filterCanvas = document.createElement('canvas');
+                filterCanvas.width = INPUT_SIZE;
+                filterCanvas.height = INPUT_SIZE;
+                const filterCtx = filterCanvas.getContext('2d');
+                filterCtx.filter = 'blur(2px)'; // Adjust this (1px to 4px) to control detail
+                filterCtx.drawImage(tempCanvas, 0, 0);
+
+                const imgData = filterCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
                 
                 // Convert RGBA to CHW float32 array (No Normalization - Raw 0-255)
                 const float32Data = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
@@ -189,7 +197,7 @@
                 logDebug(`Inference complete. Output tensor type: ${results[outputKey].type}`);
                 logDebug(`Output dims: [${results[outputKey].dims.join(', ')}]`);
 
-                // 4. Post-process (Dynamic Contrast Stretch + Masking + Denoising)
+                // 4. Post-process (Dynamic Contrast Stretch + Masking + Dilation + Speckle Filter)
                 outCanvas.width = INPUT_SIZE;
                 outCanvas.height = INPUT_SIZE;
                 const outImgData = outCtx.createImageData(INPUT_SIZE, INPUT_SIZE);
@@ -202,8 +210,8 @@
                 const range = max - min || 1;
                 const binaryMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
                 
-                // Increased threshold to 0.45 to filter out weak fur edges
-                const threshold = 0.45; 
+                // Raise this threshold to remove more of the faint fur lines
+                const threshold = 0.55; 
                 
                 for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
                     const normalized = (outputData[i] - min) / range;
@@ -216,7 +224,6 @@
                 maskCanvas.height = INPUT_SIZE;
                 const maskCtx = maskCanvas.getContext('2d');
                 
-                // Renamed variables to prevent redeclaration errors
                 const outScale = Math.min(INPUT_SIZE / img.width, INPUT_SIZE / img.height);
                 const outDrawW = img.width * outScale;
                 const outDrawH = img.height * outScale;
@@ -232,52 +239,44 @@
                     }
                 }
 
-                // --- Speckle Filter (Remove isolated dots) ---
-                const denoisedMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
+                // --- Dilation (Thicken lines to make them visible for coloring) ---
+                const dilatedMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
                 for (let y = 1; y < INPUT_SIZE - 1; y++) {
                     for (let x = 1; x < INPUT_SIZE - 1; x++) {
                         const i = y * INPUT_SIZE + x;
                         if (binaryMask[i] === 1) {
-                            let neighbors = 0;
-                            if (binaryMask[i - 1] === 1) neighbors++;
-                            if (binaryMask[i + 1] === 1) neighbors++;
-                            if (binaryMask[i - INPUT_SIZE] === 1) neighbors++;
-                            if (binaryMask[i + INPUT_SIZE] === 1) neighbors++;
-                            
-                            if (neighbors >= 2) {
-                                denoisedMask[i] = 1;
-                            }
+                            dilatedMask[i] = 1;
+                            dilatedMask[i - 1] = 1;
+                            dilatedMask[i + 1] = 1;
+                            dilatedMask[i - INPUT_SIZE] = 1;
+                            dilatedMask[i + INPUT_SIZE] = 1;
                         }
                     }
                 }
 
-                // Morphological Closing (Bridge the gaps in structural lines)
-                const closedMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
-                const radius = 2; 
-                
-                for (let y = 0; y < INPUT_SIZE; y++) {
-                    for (let x = 0; x < INPUT_SIZE; x++) {
-                        let isLine = 0;
-                        for (let dy = -radius; dy <= radius; dy++) {
-                            for (let dx = -radius; dx <= radius; dx++) {
-                                const ny = y + dy;
-                                const nx = x + dx;
-                                if (ny >= 0 && ny < INPUT_SIZE && nx >= 0 && nx < INPUT_SIZE) {
-                                    if (denoisedMask[ny * INPUT_SIZE + nx] === 1) {
-                                        isLine = 1;
-                                        break;
-                                    }
-                                }
+                // --- Speckle Filter (Remove isolated dots) ---
+                const finalMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
+                for (let y = 1; y < INPUT_SIZE - 1; y++) {
+                    for (let x = 1; x < INPUT_SIZE - 1; x++) {
+                        const i = y * INPUT_SIZE + x;
+                        if (dilatedMask[i] === 1) {
+                            let neighbors = 0;
+                            if (dilatedMask[i - 1] === 1) neighbors++;
+                            if (dilatedMask[i + 1] === 1) neighbors++;
+                            if (dilatedMask[i - INPUT_SIZE] === 1) neighbors++;
+                            if (dilatedMask[i + INPUT_SIZE] === 1) neighbors++;
+                            
+                            // If it has at least 3 neighbors, it's part of a line
+                            if (neighbors >= 3) {
+                                finalMask[i] = 1;
                             }
-                            if (isLine) break;
                         }
-                        closedMask[y * INPUT_SIZE + x] = isLine;
                     }
                 }
 
                 // Render to Canvas
                 for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
-                    const color = closedMask[i] === 1 ? 0 : 255; 
+                    const color = finalMask[i] === 1 ? 0 : 255; 
                     outImgData.data[i * 4] = color;
                     outImgData.data[i * 4 + 1] = color;
                     outImgData.data[i * 4 + 2] = color;
