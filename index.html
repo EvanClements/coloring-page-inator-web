@@ -186,29 +186,66 @@
                 logDebug(`Inference complete. Output tensor type: ${results[outputKey].type}`);
                 logDebug(`Output dims: [${results[outputKey].dims.join(', ')}]`);
 
-                // 4. Post-process (Threshold and Invert)
+                // 4. Post-process (Contrast Stretch + Threshold + Morphological Close)
                 outCanvas.width = INPUT_SIZE;
                 outCanvas.height = INPUT_SIZE;
                 const outImgData = outCtx.createImageData(INPUT_SIZE, INPUT_SIZE);
                 
+                // Find min and max
                 let min = Infinity, max = -Infinity;
                 for (let i = 0; i < outputData.length; i++) {
                     min = Math.min(min, outputData[i]);
                     max = Math.max(max, outputData[i]);
                 }
-                
                 logDebug(`TEED output range: Min=${min.toFixed(4)}, Max=${max.toFixed(4)}, Spread=${(max-min).toFixed(4)}`);
                 
-                const threshold = 0.45; 
+                // 1. Normalize the output so the lowest value is 0 and highest is 1
+                // This stretches the 0.43 - 0.84 range to 0.0 - 1.0
+                const range = max - min || 1;
+                
+                // Create a binary mask (1 for line, 0 for background)
+                const binaryMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
+                const threshold = 0.2; // On a 0-1 stretched scale, 0.2 is a good starting point
                 
                 for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
-                    const prob = outputData[i];
-                    const color = prob > threshold ? 0 : 255;
-                    
-                    outImgData.data[i * 4] = color;     // R
-                    outImgData.data[i * 4 + 1] = color; // G
-                    outImgData.data[i * 4 + 2] = color; // B
-                    outImgData.data[i * 4 + 3] = 255;   // A
+                    const normalized = (outputData[i] - min) / range;
+                    binaryMask[i] = normalized > threshold ? 1 : 0;
+                }
+
+                // 2. Morphological Closing (Bridge the gaps)
+                // This looks at every pixel. If it's part of a line, it checks its neighbors.
+                // If a background pixel is surrounded by lines, it becomes a line.
+                const closedMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
+                const radius = 2; // Increase this to 3 or 4 if lines are still too broken
+                
+                for (let y = 0; y < INPUT_SIZE; y++) {
+                    for (let x = 0; x < INPUT_SIZE; x++) {
+                        let isLine = 0;
+                        // Check a small square around the pixel
+                        for (let dy = -radius; dy <= radius; dy++) {
+                            for (let dx = -radius; dx <= radius; dx++) {
+                                const ny = y + dy;
+                                const nx = x + dx;
+                                if (ny >= 0 && ny < INPUT_SIZE && nx >= 0 && nx < INPUT_SIZE) {
+                                    if (binaryMask[ny * INPUT_SIZE + nx] === 1) {
+                                        isLine = 1;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (isLine) break;
+                        }
+                        closedMask[y * INPUT_SIZE + x] = isLine;
+                    }
+                }
+
+                // 3. Render to Canvas
+                for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
+                    const color = closedMask[i] === 1 ? 0 : 255; // Black line, White background
+                    outImgData.data[i * 4] = color;
+                    outImgData.data[i * 4 + 1] = color;
+                    outImgData.data[i * 4 + 2] = color;
+                    outImgData.data[i * 4 + 3] = 255;
                 }
                 
                 outCtx.putImageData(outImgData, 0, 0);
