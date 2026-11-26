@@ -3,24 +3,31 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Background Removal + TEED Coloring Page</title>
+    <title>Background Removal + TEED Coloring Page (v2)</title>
     <style>
         body { font-family: system-ui, sans-serif; max-width: 900px; margin: 20px auto; padding: 0 16px; }
         h1 { font-size: 1.4rem; }
+        h3 { margin: 18px 0 6px; }
         #status { color: #666; margin: 12px 0; font-weight: bold; }
         .controls { margin: 16px 0; padding: 12px; border: 1px solid #ddd; border-radius: 6px; }
-        canvas { border: 1px solid #ddd; max-width: 100%; margin: 8px 0; background: #fafafa; }
+        canvas { border: 1px solid #ddd; max-width: 100%; height: auto; margin: 8px 0; background: #fafafa; }
         button { padding: 8px 16px; cursor: pointer; font-size: 1rem; }
         button:disabled { opacity: 0.5; cursor: default; }
         .hidden { display: none; }
         .progress-bar { width: 100%; height: 20px; background: #eee; border-radius: 10px; overflow: hidden; margin-top: 8px; }
         .progress-fill { height: 100%; background: #4CAF50; width: 0%; transition: width 0.2s; }
         textarea { width: 100%; height: 150px; font-family: monospace; font-size: 12px; padding: 8px; box-sizing: border-box; background: #f5f5f5; border: 1px solid #ccc; }
+        .tune { margin: 12px 0; padding: 12px; border: 1px solid #ddd; border-radius: 6px; display: grid; gap: 12px; }
+        .tune label { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; font-size: 0.95rem; }
+        .tune label.check { display: flex; align-items: center; gap: 8px; }
+        .tune input[type=range] { grid-column: 1 / -1; width: 100%; margin: 0; }
+        .tune input[type=checkbox] { margin: 0; width: 18px; height: 18px; }
+        .tune .val { font-family: monospace; color: #333; white-space: nowrap; }
     </style>
 </head>
 <body>
     <h1>Background Removal + TEED</h1>
-    
+
     <div class="controls">
         <input type="file" id="fileInput" accept="image/*">
         <button id="processBtn" disabled>Generate Coloring Page</button>
@@ -31,9 +38,27 @@
     </div>
 
     <h3>1. Foreground (Background Removed)</h3>
-    <canvas id="foregroundCanvas"></canvas>
+    <canvas id="foregroundCanvas" class="hidden"></canvas>
 
     <h3>2. TEED Edge Output (Coloring Page)</h3>
+    <div class="tune">
+        <label>Detail (higher = more lines) <span class="val" id="detailVal">50</span>
+            <input type="range" id="detail" min="0" max="100" step="1" value="50" disabled>
+        </label>
+        <label>Remove small specks <span class="val" id="specksVal">0.02% of image</span>
+            <input type="range" id="specks" min="0" max="5" step="0.1" value="0.2" disabled>
+        </label>
+        <label>Line thickness <span class="val" id="thickVal">2 px</span>
+            <input type="range" id="thick" min="1" max="4" step="1" value="2" disabled>
+        </label>
+        <label class="check">
+            <input type="checkbox" id="useBg" checked disabled>
+            Use background removal (subject crop + silhouette outline)
+        </label>
+        <label>Texture smoothing (re-runs TEED on release) <span class="val" id="smoothVal">0 px</span>
+            <input type="range" id="smooth" min="0" max="4" step="1" value="0" disabled>
+        </label>
+    </div>
     <canvas id="outputCanvas"></canvas>
     <button id="downloadBtn" disabled>Download PNG</button>
 
@@ -44,7 +69,394 @@
         import { removeBackground } from 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/+esm';
         import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/+esm';
 
-        // --- DOM Elements ---
+        const TEED_FALLBACK = 512;   // fixed input size used if the model rejects the crop size
+        const SUBJECT_PAD = 0.08;    // padding added around the subject box, as a fraction of box size
+        const ANALYSIS_MAX = 2048;   // long edge of the alpha analysis copy (iOS canvas memory)
+
+        // <PURE>
+        // Pure helpers: typed arrays in, typed arrays out, no DOM access.
+        // Grid convention: index = y * w + x. Masks are Uint8Array with values 0/1.
+        // Out-of-image neighbours are ignored by morphology, hole fill and silhouette
+        // (so the image border never creates an outline or erodes the subject).
+
+        const LONG_EDGE = 1024;
+
+        // 3-pass separable box blur on RGBA. Alpha is copied through.
+        function boxBlurRGBA(src, w, h, r) {
+            const n = w * h;
+            const out = new Uint8ClampedArray(src.length);
+            if (r <= 0) { out.set(src); return out; }
+            const planes = [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
+            for (let i = 0; i < n; i++) {
+                planes[0][i] = src[i * 4];
+                planes[1][i] = src[i * 4 + 1];
+                planes[2][i] = src[i * 4 + 2];
+            }
+            const tmp = new Float32Array(n);
+            for (let pass = 0; pass < 3; pass++) {
+                for (let c = 0; c < 3; c++) {
+                    boxBlurLines(planes[c], tmp, w, h, r, true);
+                    boxBlurLines(tmp, planes[c], w, h, r, false);
+                }
+            }
+            for (let i = 0; i < n; i++) {
+                out[i * 4] = planes[0][i];
+                out[i * 4 + 1] = planes[1][i];
+                out[i * 4 + 2] = planes[2][i];
+                out[i * 4 + 3] = src[i * 4 + 3];
+            }
+            return out;
+        }
+
+        // One 1D box pass over every row (horizontal) or column (vertical), clamp-to-edge.
+        function boxBlurLines(src, dst, w, h, r, horizontal) {
+            const len = horizontal ? w : h;
+            const lines = horizontal ? h : w;
+            const stride = horizontal ? 1 : w;
+            const inv = 1 / (2 * r + 1);
+            for (let line = 0; line < lines; line++) {
+                const base = horizontal ? line * w : line;
+                let sum = 0;
+                for (let j = -r; j <= r; j++) {
+                    const k = j < 0 ? 0 : (j > len - 1 ? len - 1 : j);
+                    sum += src[base + k * stride];
+                }
+                for (let i = 0; i < len; i++) {
+                    dst[base + i * stride] = sum * inv;
+                    const add = Math.min(i + r + 1, len - 1);
+                    const rem = Math.max(i - r, 0);
+                    sum += src[base + add * stride] - src[base + rem * stride];
+                }
+            }
+        }
+
+        // RGBA -> CHW float32, raw 0-255 values, no normalization.
+        function rgbaToCHW(rgba, w, h) {
+            const n = w * h;
+            const out = new Float32Array(3 * n);
+            for (let i = 0; i < n; i++) {
+                out[i] = rgba[i * 4];
+                out[n + i] = rgba[i * 4 + 1];
+                out[2 * n + i] = rgba[i * 4 + 2];
+            }
+            return out;
+        }
+
+        // Min-max normalize to 0-1 (flat input gives all zeros).
+        function minMaxNormalize(data) {
+            let min = Infinity, max = -Infinity;
+            for (let i = 0; i < data.length; i++) {
+                if (data[i] < min) min = data[i];
+                if (data[i] > max) max = data[i];
+            }
+            const range = (max - min) || 1;
+            const out = new Float32Array(data.length);
+            for (let i = 0; i < data.length; i++) out[i] = (data[i] - min) / range;
+            return out;
+        }
+
+        // Bilinear resample of a single-channel float grid (pixel-centre mapping).
+        function bilinearResample(src, sw, sh, dw, dh) {
+            const out = new Float32Array(dw * dh);
+            const sx = sw / dw, sy = sh / dh;
+            for (let y = 0; y < dh; y++) {
+                let fy = (y + 0.5) * sy - 0.5;
+                if (fy < 0) fy = 0;
+                if (fy > sh - 1) fy = sh - 1;
+                const y0 = Math.floor(fy), y1 = Math.min(y0 + 1, sh - 1), wy = fy - y0;
+                for (let x = 0; x < dw; x++) {
+                    let fx = (x + 0.5) * sx - 0.5;
+                    if (fx < 0) fx = 0;
+                    if (fx > sw - 1) fx = sw - 1;
+                    const x0 = Math.floor(fx), x1 = Math.min(x0 + 1, sw - 1), wx = fx - x0;
+                    const a = src[y0 * sw + x0], b = src[y0 * sw + x1];
+                    const c = src[y1 * sw + x0], d = src[y1 * sw + x1];
+                    out[y * dw + x] = (a * (1 - wx) + b * wx) * (1 - wy) + (c * (1 - wx) + d * wx) * wy;
+                }
+            }
+            return out;
+        }
+
+        // Bounding box (exclusive max) of alpha > thr, or null if nothing is opaque enough.
+        function findSubjectBox(alpha, w, h, thr = 128) {
+            let x0 = w, y0 = h, x1 = -1, y1 = -1;
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    if (alpha[y * w + x] > thr) {
+                        if (x < x0) x0 = x;
+                        if (x > x1) x1 = x;
+                        if (y < y0) y0 = y;
+                        if (y > y1) y1 = y;
+                    }
+                }
+            }
+            if (x1 < 0) return null;
+            return { x0, y0, x1: x1 + 1, y1: y1 + 1 };
+        }
+
+        // Map a box from analysis-grid coords to original-image coords, pad each side by
+        // padFrac of that box dimension, and clamp to the image.
+        function cropRectOriginal(box, aw, ah, ow, oh, padFrac = SUBJECT_PAD) {
+            const sx = ow / aw, sy = oh / ah;
+            const bx0 = box.x0 * sx, by0 = box.y0 * sy, bx1 = box.x1 * sx, by1 = box.y1 * sy;
+            const padX = (bx1 - bx0) * padFrac, padY = (by1 - by0) * padFrac;
+            return {
+                x0: Math.max(0, Math.floor(bx0 - padX)),
+                y0: Math.max(0, Math.floor(by0 - padY)),
+                x1: Math.min(ow, Math.ceil(bx1 + padX)),
+                y1: Math.min(oh, Math.ceil(by1 + padY)),
+            };
+        }
+
+        // Long edge -> longEdge, both sides rounded to multiples of 16 (minimum 16).
+        function cropOutputSize(cw, ch, longEdge = LONG_EDGE) {
+            const s = longEdge / Math.max(cw, ch);
+            return {
+                W: Math.max(16, Math.round(cw * s / 16) * 16),
+                H: Math.max(16, Math.round(ch * s / 16) * 16),
+            };
+        }
+
+        // Connected-component labelling (iterative flood fill). Labels start at 1.
+        function labelComponents(bin, w, h, eight) {
+            const n = w * h;
+            const labels = new Int32Array(n);
+            const sizes = [0];
+            const stack = new Int32Array(n);
+            let count = 0;
+            for (let s = 0; s < n; s++) {
+                if (!bin[s] || labels[s]) continue;
+                count++;
+                let sp = 0, size = 0;
+                labels[s] = count;
+                stack[sp++] = s;
+                while (sp > 0) {
+                    const p = stack[--sp];
+                    size++;
+                    const y = (p / w) | 0, x = p - y * w;
+                    for (let dy = -1; dy <= 1; dy++) {
+                        const ny = y + dy;
+                        if (ny < 0 || ny >= h) continue;
+                        for (let dx = -1; dx <= 1; dx++) {
+                            if (dx === 0 && dy === 0) continue;
+                            if (!eight && dx !== 0 && dy !== 0) continue;
+                            const nx = x + dx;
+                            if (nx < 0 || nx >= w) continue;
+                            const q = ny * w + nx;
+                            if (bin[q] && !labels[q]) {
+                                labels[q] = count;
+                                stack[sp++] = q;
+                            }
+                        }
+                    }
+                }
+                sizes.push(size);
+            }
+            return { labels, sizes: Int32Array.from(sizes), count };
+        }
+
+        // Disk morphology (radius r) using per-row prefix sums: O(w*h*(2r+1)).
+        // dilate: out = 1 if any in-image pixel of the disk is 1.
+        // erode:  out = 1 only if every in-image pixel of the disk is 1.
+        function morphDisk(src, w, h, r, dilate) {
+            const W1 = w + 1;
+            const pre = new Int32Array(h * W1);
+            for (let y = 0; y < h; y++) {
+                const rowIn = y * w, rowP = y * W1;
+                for (let x = 0; x < w; x++) pre[rowP + x + 1] = pre[rowP + x] + src[rowIn + x];
+            }
+            const count = 2 * r + 1;
+            const dys = new Int32Array(count), hws = new Int32Array(count);
+            for (let k = 0; k < count; k++) {
+                const dy = k - r;
+                dys[k] = dy;
+                hws[k] = Math.floor(Math.sqrt(r * r - dy * dy));
+            }
+            const out = new Uint8Array(w * h);
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    let v = dilate ? 0 : 1;
+                    for (let k = 0; k < count; k++) {
+                        const yy = y + dys[k];
+                        if (yy < 0 || yy >= h) continue;
+                        const hw = hws[k];
+                        const lo = x - hw < 0 ? 0 : x - hw;
+                        const hi = x + hw > w - 1 ? w - 1 : x + hw;
+                        const s = pre[yy * W1 + hi + 1] - pre[yy * W1 + lo];
+                        if (dilate) {
+                            if (s > 0) { v = 1; break; }
+                        } else if (s < hi - lo + 1) {
+                            v = 0; break;
+                        }
+                    }
+                    out[y * w + x] = v;
+                }
+            }
+            return out;
+        }
+
+        const dilateDisk = (src, w, h, r) => morphDisk(src, w, h, r, true);
+        const erodeDisk = (src, w, h, r) => morphDisk(src, w, h, r, false);
+
+        // Close = dilate then erode.
+        const closeMask = (bin, w, h, r) => erodeDisk(dilateDisk(bin, w, h, r), w, h, r);
+
+        // Background is flood-filled from the border with 4-connectivity; any 0 pixel the
+        // flood cannot reach becomes foreground (holes).
+        function fillHoles(bin, w, h) {
+            const n = w * h;
+            const reach = new Uint8Array(n);
+            const stack = new Int32Array(n);
+            let sp = 0;
+            const seed = (i) => {
+                if (!bin[i] && !reach[i]) { reach[i] = 1; stack[sp++] = i; }
+            };
+            for (let x = 0; x < w; x++) { seed(x); seed((h - 1) * w + x); }
+            for (let y = 0; y < h; y++) { seed(y * w); seed(y * w + w - 1); }
+            while (sp > 0) {
+                const p = stack[--sp];
+                const y = (p / w) | 0, x = p - y * w;
+                if (x > 0) seed(p - 1);
+                if (x < w - 1) seed(p + 1);
+                if (y > 0) seed(p - w);
+                if (y < h - 1) seed(p + w);
+            }
+            const out = new Uint8Array(n);
+            for (let i = 0; i < n; i++) out[i] = (bin[i] || !reach[i]) ? 1 : 0;
+            return out;
+        }
+
+        // Keep only the largest 8-connected component.
+        function largestComponent(bin, w, h) {
+            const n = w * h;
+            const { labels, sizes, count } = labelComponents(bin, w, h, true);
+            const out = new Uint8Array(n);
+            if (count === 0) return out;
+            let best = 1;
+            for (let k = 2; k <= count; k++) if (sizes[k] > sizes[best]) best = k;
+            for (let i = 0; i < n; i++) out[i] = labels[i] === best ? 1 : 0;
+            return out;
+        }
+
+        // Mask stage. Returns the silhouette mask and the gate (mask eroded by 3 px).
+        // useBG false: both are all ones, so no gating and no silhouette.
+        function buildMasks(alphaCrop, w, h, useBG) {
+            const n = w * h;
+            if (!useBG || !alphaCrop) {
+                const ones = new Uint8Array(n).fill(1);
+                return { mask: ones, gate: ones };
+            }
+            const bin = new Uint8Array(n);
+            for (let i = 0; i < n; i++) bin[i] = alphaCrop[i] > 128 ? 1 : 0;
+            let mask = closeMask(bin, w, h, 3);
+            mask = fillHoles(mask, w, h);
+            mask = largestComponent(mask, w, h);
+            const gate = erodeDisk(mask, w, h, 3);
+            return { mask, gate };
+        }
+
+        // Detail 0-100 -> thresholds. Default 50 gives hi 0.6, lo 0.3.
+        function thresholdsFromDetail(detail) {
+            const hi = 0.85 - 0.5 * (detail / 100);
+            return { hi, lo: hi * 0.5 };
+        }
+
+        // Speck slider: value in units of 0.1% of image area, so minArea = value/1000 * W * H.
+        // Default 0.2 means 0.02% of the image (about 210 px at 1024x1024).
+        function minAreaFromSlider(value, w, h) {
+            return (value / 1000) * w * h;
+        }
+
+        // Hysteresis: strong (>= hi) seeds, weak (>= lo) kept only when 8-connected to a strong pixel.
+        function hysteresis(vals, w, h, lo, hi) {
+            const n = w * h;
+            const keep = new Uint8Array(n);
+            const stack = new Int32Array(n);
+            let sp = 0;
+            for (let i = 0; i < n; i++) {
+                if (vals[i] >= hi) { keep[i] = 1; stack[sp++] = i; }
+            }
+            while (sp > 0) {
+                const p = stack[--sp];
+                const y = (p / w) | 0, x = p - y * w;
+                for (let dy = -1; dy <= 1; dy++) {
+                    const ny = y + dy;
+                    if (ny < 0 || ny >= h) continue;
+                    for (let dx = -1; dx <= 1; dx++) {
+                        if (dx === 0 && dy === 0) continue;
+                        const nx = x + dx;
+                        if (nx < 0 || nx >= w) continue;
+                        const q = ny * w + nx;
+                        if (!keep[q] && vals[q] >= lo) {
+                            keep[q] = 1;
+                            stack[sp++] = q;
+                        }
+                    }
+                }
+            }
+            return keep;
+        }
+
+        // Drop 8-connected edge components smaller than minArea pixels.
+        function removeSpecks(edge, w, h, minArea) {
+            const n = w * h;
+            const { labels, sizes } = labelComponents(edge, w, h, true);
+            const out = new Uint8Array(n);
+            for (let i = 0; i < n; i++) {
+                const l = labels[i];
+                if (l && sizes[l] >= minArea) out[i] = 1;
+            }
+            return out;
+        }
+
+        // Mask pixels with at least one 4-neighbour inside the image and outside the mask.
+        function silhouette(mask, w, h) {
+            const out = new Uint8Array(w * h);
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    const i = y * w + x;
+                    if (!mask[i]) continue;
+                    if ((x > 0 && !mask[i - 1]) || (x < w - 1 && !mask[i + 1]) ||
+                        (y > 0 && !mask[i - w]) || (y < h - 1 && !mask[i + w])) {
+                        out[i] = 1;
+                    }
+                }
+            }
+            return out;
+        }
+
+        // Full post-processing from the cache. Returns line pixels (1 = ink).
+        function computeLines({ edgeNorm, mask, gate, w, h, useBG, detail, specks, thickness }) {
+            const n = w * h;
+            const { hi, lo } = thresholdsFromDetail(detail);
+            const gated = new Float32Array(n);
+            for (let i = 0; i < n; i++) gated[i] = gate[i] ? edgeNorm[i] : 0;
+            const edge = hysteresis(gated, w, h, lo, hi);
+            const cleaned = removeSpecks(edge, w, h, minAreaFromSlider(specks, w, h));
+            const union = new Uint8Array(n);
+            if (useBG) {
+                const sil = silhouette(mask, w, h);
+                for (let i = 0; i < n; i++) union[i] = cleaned[i] | sil[i];
+            } else {
+                union.set(cleaned);
+            }
+            return dilateDisk(union, w, h, thickness);
+        }
+
+        // Lines -> opaque black on white RGBA.
+        function linesToRGBA(lines) {
+            const n = lines.length;
+            const out = new Uint8ClampedArray(n * 4);
+            for (let i = 0; i < n; i++) {
+                const v = lines[i] ? 0 : 255;
+                const o = i * 4;
+                out[o] = v; out[o + 1] = v; out[o + 2] = v; out[o + 3] = 255;
+            }
+            return out;
+        }
+        // </PURE>
+
+        // ---------- DOM and pipeline (not pure) ----------
         const fileInput = document.getElementById('fileInput');
         const processBtn = document.getElementById('processBtn');
         const statusEl = document.getElementById('status');
@@ -54,266 +466,389 @@
         const progressContainer = document.getElementById('progressContainer');
         const progressFill = document.getElementById('progressFill');
         const debugLog = document.getElementById('debugLog');
+        const detailEl = document.getElementById('detail');
+        const specksEl = document.getElementById('specks');
+        const thickEl = document.getElementById('thick');
+        const useBgEl = document.getElementById('useBg');
+        const smoothEl = document.getElementById('smooth');
+        const detailVal = document.getElementById('detailVal');
+        const specksVal = document.getElementById('specksVal');
+        const thickVal = document.getElementById('thickVal');
+        const smoothVal = document.getElementById('smoothVal');
+        const tunableEls = [detailEl, specksEl, thickEl, useBgEl, smoothEl];
 
         const fgCtx = fgCanvas.getContext('2d');
         const outCtx = outCanvas.getContext('2d');
 
         let uploadedImageBlob = null;
         let session = null;
+        let cache = null;        // { hasBg, W, H, cropRGBA, edgeNorm, fgAlphaCrop, masks }
+        let generation = 0;      // bumped when the input image changes; stale work is discarded
+        let pending = 0;         // queued heavy tasks (removal / TEED)
+        let taskChain = Promise.resolve();
+        let renderQueued = false;
 
-        // --- Debug Helper ---
+        // --- Debug helper ---
         function logDebug(msg) {
             console.log(msg);
             debugLog.value += msg + '\n';
-            debugLog.scrollTop = debugLog.scrollHeight; // Auto-scroll to bottom
+            debugLog.scrollTop = debugLog.scrollHeight;
         }
 
-        // --- Initialization ---
+        // --- Small helpers ---
+        function makeCanvas(w, h) {
+            const c = document.createElement('canvas');
+            c.width = w;
+            c.height = h;
+            return c;
+        }
+        // Setting size to 0 releases the canvas backing store (matters on iOS).
+        function releaseCanvas(c) { c.width = 0; c.height = 0; }
+        function setProgress(pct) {
+            progressFill.style.width = `${Math.max(0, Math.min(100, Math.round(pct)))}%`;
+        }
+
+        function stretchRGBA(rgba, w, h, dw, dh) {
+            const a = makeCanvas(w, h);
+            a.getContext('2d').putImageData(new ImageData(rgba, w, h), 0, 0);
+            const b = makeCanvas(dw, dh);
+            const bctx = b.getContext('2d');
+            bctx.imageSmoothingEnabled = true;
+            bctx.imageSmoothingQuality = 'high';
+            bctx.drawImage(a, 0, 0, dw, dh);
+            const out = bctx.getImageData(0, 0, dw, dh).data;
+            releaseCanvas(a);
+            releaseCanvas(b);
+            return out;
+        }
+
+        // --- Controls ---
+        function readParams() {
+            return {
+                detail: Number(detailEl.value),
+                specks: Number(specksEl.value),
+                thickness: Number(thickEl.value),
+                useBG: useBgEl.checked,
+            };
+        }
+
+        function updateLabels() {
+            detailVal.textContent = detailEl.value;
+            specksVal.textContent = `${(Number(specksEl.value) / 10).toFixed(2)}% of image`;
+            thickVal.textContent = `${thickEl.value} px`;
+            smoothVal.textContent = `${smoothEl.value} px`;
+        }
+
+        function refreshControls() {
+            const busy = pending > 0;
+            const ready = !!cache && !busy;
+            for (const el of tunableEls) el.disabled = !ready;
+            processBtn.disabled = busy || !uploadedImageBlob || !session;
+            downloadBtn.disabled = busy || !cache;
+            progressContainer.classList.toggle('hidden', !busy);
+        }
+
+        // Serialise heavy tasks so removal and TEED never overlap.
+        function enqueue(task) {
+            pending++;
+            refreshControls();
+            const run = taskChain.then(task);
+            taskChain = run.catch(() => {}).then(() => {
+                pending--;
+                refreshControls();
+            });
+            return run;
+        }
+
+        // Post-processing from cache, at most once per animation frame.
+        function scheduleRender() {
+            if (renderQueued) return;
+            renderQueued = true;
+            requestAnimationFrame(() => {
+                renderQueued = false;
+                renderFromCache();
+            });
+        }
+
+        function renderFromCache() {
+            const c = cache;
+            if (!c) return;
+            const p = readParams();
+            const useBG = p.useBG && c.hasBg;
+            const key = useBG ? 'bg' : 'free';
+            if (!c.masks[key]) c.masks[key] = buildMasks(c.fgAlphaCrop, c.W, c.H, useBG);
+            const { mask, gate } = c.masks[key];
+            const lines = computeLines({
+                edgeNorm: c.edgeNorm, mask, gate, w: c.W, h: c.H, useBG,
+                detail: p.detail, specks: p.specks, thickness: p.thickness,
+            });
+            if (outCanvas.width !== c.W || outCanvas.height !== c.H) {
+                outCanvas.width = c.W;
+                outCanvas.height = c.H;
+            }
+            outCtx.putImageData(new ImageData(linesToRGBA(lines), c.W, c.H), 0, 0);
+        }
+
+        // --- TEED ---
+        async function runTeed(rgba, w, h) {
+            const tensor = new ort.Tensor('float32', rgbaToCHW(rgba, w, h), [1, 3, h, w]);
+            const feeds = {};
+            feeds[session.inputNames[0]] = tensor;
+            const results = await session.run(feeds);
+            const out = results[session.outputNames[0]];
+            const dims = out.dims;
+            const oh = dims[dims.length - 2], ow = dims[dims.length - 1];
+            logDebug(`Inference OK at ${w}x${h}. Output type: ${out.type}, dims [${dims.join(', ')}]`);
+            const norm = minMaxNormalize(out.data);
+            if (norm.length !== oh * ow) {
+                throw new Error(`unexpected output size ${norm.length} for dims [${dims.join(', ')}]`);
+            }
+            return { norm, w: ow, h: oh };
+        }
+
+        // Returns the edge map (0-1) at W x H. Falls back to a stretched 512 run if the
+        // model rejects the crop size, then bilinearly upsamples.
+        async function inferEdges(rgba, W, H, blurR) {
+            const input = blurR > 0 ? boxBlurRGBA(rgba, W, H, blurR) : rgba;
+            logDebug(`TEED input ${W}x${H}${blurR > 0 ? `, texture blur ${blurR}px (3-pass box)` : ''}`);
+            let r;
+            try {
+                r = await runTeed(input, W, H);
+            } catch (e) {
+                logDebug(`TEED run at ${W}x${H} failed: ${e.message}`);
+                logDebug(`Retrying at ${TEED_FALLBACK}x${TEED_FALLBACK} (stretched), then upsampling.`);
+                const small = stretchRGBA(input, W, H, TEED_FALLBACK, TEED_FALLBACK);
+                r = await runTeed(small, TEED_FALLBACK, TEED_FALLBACK);
+            }
+            if (r.w === W && r.h === H) return r.norm;
+            logDebug(`Upsampling edge map ${r.w}x${r.h} -> ${W}x${H} (bilinear).`);
+            return bilinearResample(r.norm, r.w, r.h, W, H);
+        }
+
+        // --- Full pipeline: removal (optional) -> crop -> TEED -> cache -> render ---
+        async function runPipeline(useBG, reason) {
+            const file = uploadedImageBlob;
+            const myGen = generation;
+            if (!file || !session) return;
+            const blurR = Number(smoothEl.value);
+            const resources = [];
+            let fgBmp = null, origBmp = null;
+            try {
+                setProgress(0);
+                logDebug(`--- ${reason}: background removal ${useBG ? 'ON' : 'OFF'}, texture blur ${blurR}px ---`);
+
+                // 1. Background removal
+                let alphaCanvas = null, alphaW = 0, alphaH = 0, box = null;
+                if (useBG) {
+                    statusEl.textContent = 'Removing background...';
+                    logDebug('Starting background removal...');
+                    const fgBlob = await removeBackground(file, {
+                        progress: (key, current, total) => {
+                            if (total) setProgress((current / total) * 70);
+                        }
+                    });
+                    logDebug('Background removal complete.');
+                    fgBmp = await createImageBitmap(fgBlob);
+
+                    // Foreground preview, composited on white.
+                    fgCanvas.width = fgBmp.width;
+                    fgCanvas.height = fgBmp.height;
+                    fgCtx.fillStyle = '#ffffff';
+                    fgCtx.fillRect(0, 0, fgBmp.width, fgBmp.height);
+                    fgCtx.drawImage(fgBmp, 0, 0);
+                    fgCanvas.classList.remove('hidden');
+                    logDebug(`Foreground image size: ${fgBmp.width}x${fgBmp.height}`);
+
+                    // Alpha analysis copy of the foreground (capped at ANALYSIS_MAX long edge).
+                    const k = Math.min(1, ANALYSIS_MAX / Math.max(fgBmp.width, fgBmp.height));
+                    alphaW = Math.max(1, Math.round(fgBmp.width * k));
+                    alphaH = Math.max(1, Math.round(fgBmp.height * k));
+                    alphaCanvas = makeCanvas(alphaW, alphaH);
+                    resources.push(alphaCanvas);
+                    alphaCanvas.getContext('2d').drawImage(fgBmp, 0, 0, alphaW, alphaH);
+                    fgBmp.close();
+                    fgBmp = null;
+
+                    const ad = alphaCanvas.getContext('2d').getImageData(0, 0, alphaW, alphaH).data;
+                    const alpha = new Uint8Array(alphaW * alphaH);
+                    for (let i = 0; i < alpha.length; i++) alpha[i] = ad[i * 4 + 3];
+                    box = findSubjectBox(alpha, alphaW, alphaH);
+                    if (!box) logDebug('No subject pixels (alpha > 128). Using the full image with no mask.');
+                    setProgress(70);
+                }
+                const hasBg = !!box;
+
+                // 2. Crop the ORIGINAL (full colour) image
+                origBmp = await createImageBitmap(file);
+                const origW = origBmp.width, origH = origBmp.height;
+                let rect = { x0: 0, y0: 0, x1: origW, y1: origH };
+                if (hasBg) rect = cropRectOriginal(box, alphaW, alphaH, origW, origH, SUBJECT_PAD);
+                const cw = rect.x1 - rect.x0, ch = rect.y1 - rect.y0;
+                const { W, H } = cropOutputSize(cw, ch);
+                logDebug(`Original ${origW}x${origH}; crop x ${rect.x0}-${rect.x1}, y ${rect.y0}-${rect.y1}; TEED size ${W}x${H}`);
+
+                const cropCanvas = makeCanvas(W, H);
+                resources.push(cropCanvas);
+                const cctx = cropCanvas.getContext('2d');
+                cctx.imageSmoothingEnabled = true;
+                cctx.imageSmoothingQuality = 'high';
+                cctx.fillStyle = '#ffffff';
+                cctx.fillRect(0, 0, W, H);
+                cctx.drawImage(origBmp, rect.x0, rect.y0, cw, ch, 0, 0, W, H);
+                const cropRGBA = cctx.getImageData(0, 0, W, H).data;
+                origBmp.close();
+                origBmp = null;
+
+                // 3. Subject alpha resampled into the same crop grid
+                let fgAlphaCrop = null;
+                if (hasBg) {
+                    const kx = alphaW / origW, ky = alphaH / origH;
+                    const ac = makeCanvas(W, H);
+                    resources.push(ac);
+                    const actx = ac.getContext('2d');
+                    actx.imageSmoothingEnabled = true;
+                    actx.imageSmoothingQuality = 'high';
+                    actx.drawImage(alphaCanvas, rect.x0 * kx, rect.y0 * ky, cw * kx, ch * ky, 0, 0, W, H);
+                    const ad2 = actx.getImageData(0, 0, W, H).data;
+                    fgAlphaCrop = new Uint8Array(W * H);
+                    for (let i = 0; i < W * H; i++) fgAlphaCrop[i] = ad2[i * 4 + 3];
+                }
+
+                // 4. TEED
+                statusEl.textContent = 'Processing edges with TEED...';
+                setProgress(75);
+                const edgeNorm = await inferEdges(cropRGBA, W, H, blurR);
+                setProgress(95);
+
+                if (myGen !== generation) {
+                    logDebug('Input changed during processing; result discarded.');
+                    return;
+                }
+
+                // 5. Cache and render
+                cache = { hasBg, W, H, cropRGBA, edgeNorm, fgAlphaCrop, masks: {} };
+                renderFromCache();
+                setProgress(100);
+                logDebug('Rendering complete.');
+                statusEl.textContent = 'Done! Adjust the sliders to tune the lines.';
+            } catch (err) {
+                console.error(err);
+                logDebug(`Pipeline Error: ${err.message}`);
+                statusEl.textContent = 'Error: ' + err.message;
+            } finally {
+                if (fgBmp) fgBmp.close();
+                if (origBmp) origBmp.close();
+                resources.forEach(releaseCanvas);
+                refreshControls();
+            }
+        }
+
+        // Re-run only TEED (texture smoothing changed); the crop and mask are reused.
+        async function reinferFromCache(blurR) {
+            const c = cache;
+            const myGen = generation;
+            if (!c || !session) return;
+            try {
+                statusEl.textContent = 'Re-running TEED with texture smoothing...';
+                setProgress(10);
+                logDebug(`--- Re-run TEED: texture blur ${blurR}px ---`);
+                const edgeNorm = await inferEdges(c.cropRGBA, c.W, c.H, blurR);
+                if (myGen !== generation || cache !== c) return;
+                c.edgeNorm = edgeNorm;
+                renderFromCache();
+                setProgress(100);
+                statusEl.textContent = 'Done!';
+            } catch (err) {
+                console.error(err);
+                logDebug(`Re-run Error: ${err.message}`);
+                statusEl.textContent = 'Error: ' + err.message;
+            }
+        }
+
+        // --- Model load ---
         async function initONNX() {
             try {
                 statusEl.textContent = 'Loading TEED ONNX model...';
                 logDebug('Initializing ONNX Runtime...');
-                
+
                 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/dist/';
                 session = await ort.InferenceSession.create('./models/teed.onnx', {
                     executionProviders: ['webgpu', 'wasm'],
                     graphOptimizationLevel: 'all'
                 });
-                
-                logDebug(`ONNX Session loaded successfully.`);
+
+                logDebug('ONNX Session loaded successfully.');
                 logDebug(`Input Names: ${session.inputNames.join(', ')}`);
                 logDebug(`Output Names: ${session.outputNames.join(', ')}`);
-                
+
                 statusEl.textContent = 'Models ready. Select an image.';
             } catch (e) {
                 console.error(e);
                 logDebug(`Error loading ONNX model: ${e.message}`);
                 statusEl.textContent = 'Error loading ONNX model. Check debug log.';
             }
+            refreshControls();
         }
 
-        initONNX();
-
-        // --- File Upload ---
+        // --- Events ---
         fileInput.addEventListener('change', (e) => {
             const file = e.target.files[0];
             if (!file) return;
+            generation++;
             uploadedImageBlob = file;
-            processBtn.disabled = false;
+            cache = null;
+            debugLog.value = '';
+            fgCanvas.classList.add('hidden');
             statusEl.textContent = 'Image loaded. Click Generate.';
-            debugLog.value = ''; // Clear previous logs
+            refreshControls();
         });
 
-        // --- Main Pipeline ---
-        processBtn.addEventListener('click', async () => {
+        processBtn.addEventListener('click', () => {
             if (!uploadedImageBlob || !session) return;
-            
-            processBtn.disabled = true;
-            downloadBtn.disabled = true;
-            progressContainer.classList.remove('hidden');
-            progressFill.style.width = '0%';
-            debugLog.value = ''; // Reset log for new run
+            debugLog.value = '';
+            enqueue(() => runPipeline(useBgEl.checked, 'Generate'));
+        });
 
-            try {
-                // 1. Background Removal
-                statusEl.textContent = 'Removing background...';
-                logDebug('Starting background removal...');
-                
-                const fgBlob = await removeBackground(uploadedImageBlob, {
-                    progress: (key, current, total) => {
-                        const pct = Math.round((current / total) * 100);
-                        progressFill.style.width = `${pct}%`;
-                    }
-                });
-                progressFill.style.width = '100%';
-                logDebug('Background removal complete.');
+        for (const el of [detailEl, specksEl, thickEl]) {
+            el.addEventListener('input', () => {
+                updateLabels();
+                scheduleRender();
+            });
+        }
 
-                // Draw foreground to canvas to composite on white
-                const img = await createImageBitmap(fgBlob);
-                fgCanvas.width = img.width;
-                fgCanvas.height = img.height;
-                
-                // Composite on white
-                fgCtx.fillStyle = '#ffffff';
-                fgCtx.fillRect(0, 0, fgCanvas.width, fgCanvas.height);
-                fgCtx.drawImage(img, 0, 0);
-                logDebug(`Foreground image size: ${img.width}x${img.height}`);
+        smoothEl.addEventListener('input', updateLabels);
+        smoothEl.addEventListener('change', () => {
+            updateLabels();
+            if (!cache) return;
+            enqueue(() => reinferFromCache(Number(smoothEl.value)));
+        });
 
-                // 2. Preprocess for TEED (Preserve Aspect Ratio, Use Original Image)
-                statusEl.textContent = 'Processing edges with TEED...';
-                logDebug('Preprocessing image for TEED (Letterboxing)...');
-                const INPUT_SIZE = 512;
-                
-                // We need the original image for TEED to see the natural contrast
-                const originalImg = await createImageBitmap(uploadedImageBlob);
-                
-                const tempCanvas = document.createElement('canvas');
-                tempCanvas.width = INPUT_SIZE;
-                tempCanvas.height = INPUT_SIZE;
-                const tempCtx = tempCanvas.getContext('2d');
-                
-                // Fill with white first
-                tempCtx.fillStyle = '#ffffff';
-                tempCtx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
-                
-                // Calculate scaling to fit inside 512x512 while preserving aspect ratio
-                const scale = Math.min(INPUT_SIZE / originalImg.width, INPUT_SIZE / originalImg.height);
-                const drawW = originalImg.width * scale;
-                const drawH = originalImg.height * scale;
-                const offsetX = (INPUT_SIZE - drawW) / 2;
-                const offsetY = (INPUT_SIZE - drawH) / 2;
-                
-                tempCtx.drawImage(originalImg, offsetX, offsetY, drawW, drawH);
-
-                // --- NEW: Blur out texture, keep edges ---
-                const filterCanvas = document.createElement('canvas');
-                filterCanvas.width = INPUT_SIZE;
-                filterCanvas.height = INPUT_SIZE;
-                const filterCtx = filterCanvas.getContext('2d');
-                // filterCtx.filter = 'blur(3px)'; // Adjust this (1px to 4px) to control detail
-                filterCtx.drawImage(tempCanvas, 0, 0);
-
-                const imgData = filterCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
-                
-                // Convert RGBA to CHW float32 array (No Normalization - Raw 0-255)
-                const float32Data = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
-
-                for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
-                    // Just pass the raw RGB values (0 to 255)
-                    float32Data[i] = imgData[i * 4];                     // R
-                    float32Data[INPUT_SIZE * INPUT_SIZE + i] = imgData[i * 4 + 1]; // G
-                    float32Data[2 * INPUT_SIZE * INPUT_SIZE + i] = imgData[i * 4 + 2]; // B
-                }
-
-                // 3. Run TEED Inference
-                const tensor = new ort.Tensor('float32', float32Data, [1, 3, INPUT_SIZE, INPUT_SIZE]);
-                const feeds = {};
-                feeds[session.inputNames[0]] = tensor;
-                
-                const results = await session.run(feeds);
-                const outputKey = session.outputNames[0];
-                const outputData = results[outputKey].data;
-                
-                logDebug(`Inference complete. Output tensor type: ${results[outputKey].type}`);
-                logDebug(`Output dims: [${results[outputKey].dims.join(', ')}]`);
-
-                // 4. Post-process (Mask Silhouette + TEED Details)
-                outCanvas.width = INPUT_SIZE;
-                outCanvas.height = INPUT_SIZE;
-                const outImgData = outCtx.createImageData(INPUT_SIZE, INPUT_SIZE);
-                
-                let min = Infinity, max = -Infinity;
-                for (let i = 0; i < outputData.length; i++) {
-                    min = Math.min(min, outputData[i]);
-                    max = Math.max(max, outputData[i]);
-                }
-                const range = max - min || 1;
-                
-                // 1. Get the TEED edges (High confidence only)
-                const edgeMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
-                const edgeThreshold = 0.65; // High threshold to only get eyes/nose, no fur
-                
-                for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
-                    const normalized = (outputData[i] - min) / range;
-                    edgeMask[i] = normalized > edgeThreshold ? 1 : 0;
-                }
-
-                // 2. Get the AI Foreground Mask (The solid cat silhouette)
-                const maskCanvas = document.createElement('canvas');
-                maskCanvas.width = INPUT_SIZE;
-                maskCanvas.height = INPUT_SIZE;
-                const maskCtx = maskCanvas.getContext('2d');
-                
-                const outScale = Math.min(INPUT_SIZE / img.width, INPUT_SIZE / img.height);
-                const outDrawW = img.width * outScale;
-                const outDrawH = img.height * outScale;
-                const outOffsetX = (INPUT_SIZE - outDrawW) / 2;
-                const outOffsetY = (INPUT_SIZE - outDrawH) / 2;
-                
-                maskCtx.drawImage(img, outOffsetX, outOffsetY, outDrawW, outDrawH);
-                const maskData = maskCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
-
-                // 3. Combine them
-                const finalMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
-                
-                for (let y = 1; y < INPUT_SIZE - 1; y++) {
-                    for (let x = 1; x < INPUT_SIZE - 1; x++) {
-                        const i = y * INPUT_SIZE + x;
-                        
-                        const isCat = maskData[i * 4 + 3] > 128; // Is this inside the cat?
-                        const isEdge = edgeMask[i] === 1;        // Did TEED find a line here?
-                        
-                        if (!isCat) {
-                            finalMask[i] = 0; // Outside the cat = always white
-                            continue;
-                        }
-
-                        // If TEED found an edge inside the cat, draw it
-                        if (isEdge) {
-                            finalMask[i] = 1;
-                        } 
-                        // If this pixel is on the boundary of the cat, draw it
-                        else {
-                            const leftCat = maskData[(i - 1) * 4 + 3] > 128;
-                            const rightCat = maskData[(i + 1) * 4 + 3] > 128;
-                            const upCat = maskData[(i - INPUT_SIZE) * 4 + 3] > 128;
-                            const downCat = maskData[(i + INPUT_SIZE) * 4 + 3] > 128;
-                            
-                            // If a neighboring pixel is NOT the cat, this is the silhouette outline
-                            if (!leftCat || !rightCat || !upCat || !downCat) {
-                                finalMask[i] = 1;
-                            }
-                        }
-                    }
-                }
-
-                // 4. Thicken lines slightly and clean up
-                const thickMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
-                for (let y = 1; y < INPUT_SIZE - 1; y++) {
-                    for (let x = 1; x < INPUT_SIZE - 1; x++) {
-                        const i = y * INPUT_SIZE + x;
-                        if (finalMask[i] === 1) {
-                            thickMask[i] = 1;
-                            thickMask[i - 1] = 1;
-                            thickMask[i + 1] = 1;
-                            thickMask[i - INPUT_SIZE] = 1;
-                            thickMask[i + INPUT_SIZE] = 1;
-                        }
-                    }
-                }
-
-                // 5. Render to Canvas
-                for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
-                    const color = thickMask[i] === 1 ? 0 : 255; 
-                    outImgData.data[i * 4] = color;
-                    outImgData.data[i * 4 + 1] = color;
-                    outImgData.data[i * 4 + 2] = color;
-                    outImgData.data[i * 4 + 3] = 255;
-                }
-                
-                outCtx.putImageData(outImgData, 0, 0);
-                
-                logDebug('Rendering complete.');
-                statusEl.textContent = 'Done!';
-                downloadBtn.disabled = false;
-                
-            } catch (err) {
-                console.error(err);
-                logDebug(`Pipeline Error: ${err.message}`);
-                statusEl.textContent = 'Error: ' + err.message;
-            } finally {
-                processBtn.disabled = false;
-                progressContainer.classList.add('hidden');
+        useBgEl.addEventListener('change', () => {
+            if (!cache) return;
+            if (useBgEl.checked && !cache.hasBg) {
+                enqueue(() => runPipeline(true, 'Background removal enabled'));
+            } else {
+                scheduleRender();
             }
         });
 
-        // --- Download ---
         downloadBtn.addEventListener('click', () => {
-            const link = document.createElement('a');
-            link.download = 'coloring-page.png';
-            link.href = outCanvas.toDataURL('image/png');
-            link.click();
+            outCanvas.toBlob((blob) => {
+                if (!blob) return;
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'coloring-page.png';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }, 'image/png');
         });
+
+        updateLabels();
+        refreshControls();
+        initONNX();
     </script>
 </body>
 </html>

@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Background Removal + TEED Coloring Page</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 20px auto; padding: 0 16px; }
+        h1 { font-size: 1.4rem; }
+        #status { color: #666; margin: 12px 0; font-weight: bold; }
+        .controls { margin: 16px 0; padding: 12px; border: 1px solid #ddd; border-radius: 6px; }
+        canvas { border: 1px solid #ddd; max-width: 100%; margin: 8px 0; background: #fafafa; }
+        button { padding: 8px 16px; cursor: pointer; font-size: 1rem; }
+        button:disabled { opacity: 0.5; cursor: default; }
+        .hidden { display: none; }
+        .progress-bar { width: 100%; height: 20px; background: #eee; border-radius: 10px; overflow: hidden; margin-top: 8px; }
+        .progress-fill { height: 100%; background: #4CAF50; width: 0%; transition: width 0.2s; }
+        textarea { width: 100%; height: 150px; font-family: monospace; font-size: 12px; padding: 8px; box-sizing: border-box; background: #f5f5f5; border: 1px solid #ccc; }
+    </style>
+</head>
+<body>
+    <h1>Background Removal + TEED</h1>
+    
+    <div class="controls">
+        <input type="file" id="fileInput" accept="image/*">
+        <button id="processBtn" disabled>Generate Coloring Page</button>
+        <p id="status">Select an image to begin.</p>
+        <div class="progress-bar hidden" id="progressContainer">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+    </div>
+
+    <h3>1. Foreground (Background Removed)</h3>
+    <canvas id="foregroundCanvas"></canvas>
+
+    <h3>2. TEED Edge Output (Coloring Page)</h3>
+    <canvas id="outputCanvas"></canvas>
+    <button id="downloadBtn" disabled>Download PNG</button>
+
+    <h3>Debug Log</h3>
+    <textarea id="debugLog" readonly placeholder="Debug information will appear here..."></textarea>
+
+    <script type="module">
+        import { removeBackground } from 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/+esm';
+        import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/+esm';
+
+        // --- DOM Elements ---
+        const fileInput = document.getElementById('fileInput');
+        const processBtn = document.getElementById('processBtn');
+        const statusEl = document.getElementById('status');
+        const fgCanvas = document.getElementById('foregroundCanvas');
+        const outCanvas = document.getElementById('outputCanvas');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressFill = document.getElementById('progressFill');
+        const debugLog = document.getElementById('debugLog');
+
+        const fgCtx = fgCanvas.getContext('2d');
+        const outCtx = outCanvas.getContext('2d');
+
+        let uploadedImageBlob = null;
+        let session = null;
+
+        // --- Debug Helper ---
+        function logDebug(msg) {
+            console.log(msg);
+            debugLog.value += msg + '\n';
+            debugLog.scrollTop = debugLog.scrollHeight; // Auto-scroll to bottom
+        }
+
+        // --- Initialization ---
+        async function initONNX() {
+            try {
+                statusEl.textContent = 'Loading TEED ONNX model...';
+                logDebug('Initializing ONNX Runtime...');
+                
+                ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/dist/';
+                session = await ort.InferenceSession.create('./models/teed.onnx', {
+                    executionProviders: ['webgpu', 'wasm'],
+                    graphOptimizationLevel: 'all'
+                });
+                
+                logDebug(`ONNX Session loaded successfully.`);
+                logDebug(`Input Names: ${session.inputNames.join(', ')}`);
+                logDebug(`Output Names: ${session.outputNames.join(', ')}`);
+                
+                statusEl.textContent = 'Models ready. Select an image.';
+            } catch (e) {
+                console.error(e);
+                logDebug(`Error loading ONNX model: ${e.message}`);
+                statusEl.textContent = 'Error loading ONNX model. Check debug log.';
+            }
+        }
+
+        initONNX();
+
+        // --- File Upload ---
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            uploadedImageBlob = file;
+            processBtn.disabled = false;
+            statusEl.textContent = 'Image loaded. Click Generate.';
+            debugLog.value = ''; // Clear previous logs
+        });
+
+        // --- Main Pipeline ---
+        processBtn.addEventListener('click', async () => {
+            if (!uploadedImageBlob || !session) return;
+            
+            processBtn.disabled = true;
+            downloadBtn.disabled = true;
+            progressContainer.classList.remove('hidden');
+            progressFill.style.width = '0%';
+            debugLog.value = ''; // Reset log for new run
+
+            try {
+                // 1. Background Removal
+                statusEl.textContent = 'Removing background...';
+                logDebug('Starting background removal...');
+                
+                const fgBlob = await removeBackground(uploadedImageBlob, {
+                    progress: (key, current, total) => {
+                        const pct = Math.round((current / total) * 100);
+                        progressFill.style.width = `${pct}%`;
+                    }
+                });
+                progressFill.style.width = '100%';
+                logDebug('Background removal complete.');
+
+                // Draw foreground to canvas to composite on white
+                const img = await createImageBitmap(fgBlob);
+                fgCanvas.width = img.width;
+                fgCanvas.height = img.height;
+                
+                // Composite on white
+                fgCtx.fillStyle = '#ffffff';
+                fgCtx.fillRect(0, 0, fgCanvas.width, fgCanvas.height);
+                fgCtx.drawImage(img, 0, 0);
+                logDebug(`Foreground image size: ${img.width}x${img.height}`);
+
+                // 2. Preprocess for TEED (Preserve Aspect Ratio, Use Original Image)
+                statusEl.textContent = 'Processing edges with TEED...';
+                logDebug('Preprocessing image for TEED (Letterboxing)...');
+                const INPUT_SIZE = 512;
+                
+                // We need the original image for TEED to see the natural contrast
+                const originalImg = await createImageBitmap(uploadedImageBlob);
+                
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = INPUT_SIZE;
+                tempCanvas.height = INPUT_SIZE;
+                const tempCtx = tempCanvas.getContext('2d');
+                
+                // Fill with white first
+                tempCtx.fillStyle = '#ffffff';
+                tempCtx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
+                
+                // Calculate scaling to fit inside 512x512 while preserving aspect ratio
+                const scale = Math.min(INPUT_SIZE / originalImg.width, INPUT_SIZE / originalImg.height);
+                const drawW = originalImg.width * scale;
+                const drawH = originalImg.height * scale;
+                const offsetX = (INPUT_SIZE - drawW) / 2;
+                const offsetY = (INPUT_SIZE - drawH) / 2;
+                
+                tempCtx.drawImage(originalImg, offsetX, offsetY, drawW, drawH);
+
+                // --- NEW: Blur out texture, keep edges ---
+                const filterCanvas = document.createElement('canvas');
+                filterCanvas.width = INPUT_SIZE;
+                filterCanvas.height = INPUT_SIZE;
+                const filterCtx = filterCanvas.getContext('2d');
+                // filterCtx.filter = 'blur(3px)'; // Adjust this (1px to 4px) to control detail
+                filterCtx.drawImage(tempCanvas, 0, 0);
+
+                const imgData = filterCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
+                
+                // Convert RGBA to CHW float32 array (No Normalization - Raw 0-255)
+                const float32Data = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
+
+                for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
+                    // Just pass the raw RGB values (0 to 255)
+                    float32Data[i] = imgData[i * 4];                     // R
+                    float32Data[INPUT_SIZE * INPUT_SIZE + i] = imgData[i * 4 + 1]; // G
+                    float32Data[2 * INPUT_SIZE * INPUT_SIZE + i] = imgData[i * 4 + 2]; // B
+                }
+
+                // 3. Run TEED Inference
+                const tensor = new ort.Tensor('float32', float32Data, [1, 3, INPUT_SIZE, INPUT_SIZE]);
+                const feeds = {};
+                feeds[session.inputNames[0]] = tensor;
+                
+                const results = await session.run(feeds);
+                const outputKey = session.outputNames[0];
+                const outputData = results[outputKey].data;
+                
+                logDebug(`Inference complete. Output tensor type: ${results[outputKey].type}`);
+                logDebug(`Output dims: [${results[outputKey].dims.join(', ')}]`);
+
+                // 4. Post-process (Mask Silhouette + TEED Details)
+                outCanvas.width = INPUT_SIZE;
+                outCanvas.height = INPUT_SIZE;
+                const outImgData = outCtx.createImageData(INPUT_SIZE, INPUT_SIZE);
+                
+                let min = Infinity, max = -Infinity;
+                for (let i = 0; i < outputData.length; i++) {
+                    min = Math.min(min, outputData[i]);
+                    max = Math.max(max, outputData[i]);
+                }
+                const range = max - min || 1;
+                
+                // 1. Get the TEED edges (High confidence only)
+                const edgeMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
+                const edgeThreshold = 0.65; // High threshold to only get eyes/nose, no fur
+                
+                for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
+                    const normalized = (outputData[i] - min) / range;
+                    edgeMask[i] = normalized > edgeThreshold ? 1 : 0;
+                }
+
+                // 2. Get the AI Foreground Mask (The solid cat silhouette)
+                const maskCanvas = document.createElement('canvas');
+                maskCanvas.width = INPUT_SIZE;
+                maskCanvas.height = INPUT_SIZE;
+                const maskCtx = maskCanvas.getContext('2d');
+                
+                const outScale = Math.min(INPUT_SIZE / img.width, INPUT_SIZE / img.height);
+                const outDrawW = img.width * outScale;
+                const outDrawH = img.height * outScale;
+                const outOffsetX = (INPUT_SIZE - outDrawW) / 2;
+                const outOffsetY = (INPUT_SIZE - outDrawH) / 2;
+                
+                maskCtx.drawImage(img, outOffsetX, outOffsetY, outDrawW, outDrawH);
+                const maskData = maskCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
+
+                // 3. Combine them
+                const finalMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
+                
+                for (let y = 1; y < INPUT_SIZE - 1; y++) {
+                    for (let x = 1; x < INPUT_SIZE - 1; x++) {
+                        const i = y * INPUT_SIZE + x;
+                        
+                        const isCat = maskData[i * 4 + 3] > 128; // Is this inside the cat?
+                        const isEdge = edgeMask[i] === 1;        // Did TEED find a line here?
+                        
+                        if (!isCat) {
+                            finalMask[i] = 0; // Outside the cat = always white
+                            continue;
+                        }
+
+                        // If TEED found an edge inside the cat, draw it
+                        if (isEdge) {
+                            finalMask[i] = 1;
+                        } 
+                        // If this pixel is on the boundary of the cat, draw it
+                        else {
+                            const leftCat = maskData[(i - 1) * 4 + 3] > 128;
+                            const rightCat = maskData[(i + 1) * 4 + 3] > 128;
+                            const upCat = maskData[(i - INPUT_SIZE) * 4 + 3] > 128;
+                            const downCat = maskData[(i + INPUT_SIZE) * 4 + 3] > 128;
+                            
+                            // If a neighboring pixel is NOT the cat, this is the silhouette outline
+                            if (!leftCat || !rightCat || !upCat || !downCat) {
+                                finalMask[i] = 1;
+                            }
+                        }
+                    }
+                }
+
+                // 4. Thicken lines slightly and clean up
+                const thickMask = new Uint8Array(INPUT_SIZE * INPUT_SIZE);
+                for (let y = 1; y < INPUT_SIZE - 1; y++) {
+                    for (let x = 1; x < INPUT_SIZE - 1; x++) {
+                        const i = y * INPUT_SIZE + x;
+                        if (finalMask[i] === 1) {
+                            thickMask[i] = 1;
+                            thickMask[i - 1] = 1;
+                            thickMask[i + 1] = 1;
+                            thickMask[i - INPUT_SIZE] = 1;
+                            thickMask[i + INPUT_SIZE] = 1;
+                        }
+                    }
+                }
+
+                // 5. Render to Canvas
+                for (let i = 0; i < INPUT_SIZE * INPUT_SIZE; i++) {
+                    const color = thickMask[i] === 1 ? 0 : 255; 
+                    outImgData.data[i * 4] = color;
+                    outImgData.data[i * 4 + 1] = color;
+                    outImgData.data[i * 4 + 2] = color;
+                    outImgData.data[i * 4 + 3] = 255;
+                }
+                
+                outCtx.putImageData(outImgData, 0, 0);
+                
+                logDebug('Rendering complete.');
+                statusEl.textContent = 'Done!';
+                downloadBtn.disabled = false;
+                
+            } catch (err) {
+                console.error(err);
+                logDebug(`Pipeline Error: ${err.message}`);
+                statusEl.textContent = 'Error: ' + err.message;
+            } finally {
+                processBtn.disabled = false;
+                progressContainer.classList.add('hidden');
+            }
+        });
+
+        // --- Download ---
+        downloadBtn.addEventListener('click', () => {
+            const link = document.createElement('a');
+            link.download = 'coloring-page.png';
+            link.href = outCanvas.toDataURL('image/png');
+            link.click();
+        });
+    </script>
+</body>
+</html>
