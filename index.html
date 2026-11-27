@@ -621,8 +621,8 @@
         }
 
         // ---- full pipeline from cached edge map ----
-
-        function buildStrokes({ edgeNorm, softMask, w, h, detail, specks, minLen, bgKeep }) {
+        // v1 of buildStrokes function
+        /* function buildStrokes({ edgeNorm, softMask, w, h, detail, specks, minLen, bgKeep }) {
             const edge = computeEdgeMask({ edgeNorm, softMask, w, h, detail, specks, bgKeep });
             let skel = skeletonize(edge, w, h);
             skel = pruneJunctionSpurs(skel, w, h, 4);
@@ -642,7 +642,93 @@
                 }
             }
             return strokes;
+        } */
+        
+        // buildStrokes v2 - 2026-11-27
+        // START
+        // New helper: Merge polylines that share a junction endpoint
+        function joinPolylines(polys) {
+            let merged = true;
+            while (merged) {
+                merged = false;
+                for (let i = 0; i < polys.length; i++) {
+                    for (let j = i + 1; j < polys.length; j++) {
+                        const a = polys[i];
+                        const b = polys[j];
+                        // Check all 4 combinations of endpoints
+                        const combos = [
+                            { aEnd: a.pts[a.pts.length - 1], bEnd: b.pts[0], aRev: false, bRev: false },
+                            { aEnd: a.pts[a.pts.length - 1], bEnd: b.pts[b.pts.length - 1], aRev: false, bRev: true },
+                            { aEnd: a.pts[0], bEnd: b.pts[0], aRev: true, bRev: false },
+                            { aEnd: a.pts[0], bEnd: b.pts[b.pts.length - 1], aRev: true, bRev: true },
+                        ];
+                        let matched = null;
+                        for (const c of combos) {
+                            // If endpoints are exactly the same (junction pixel)
+                            if (c.aEnd[0] === c.bEnd[0] && c.aEnd[1] === c.bEnd[1]) {
+                                // Ensure tangents are roughly aligned (dot product > 0)
+                                const aIdx = c.aRev ? 1 : a.pts.length - 2;
+                                const bIdx = c.bRev ? b.pts.length - 2 : 1;
+                                const aDir = [c.aEnd[0] - a.pts[aIdx][0], c.aEnd[1] - a.pts[aIdx][1]];
+                                const bDir = [b.pts[bIdx][0] - c.bEnd[0], b.pts[bIdx][1] - c.bEnd[1]];
+                                const dot = aDir[0] * bDir[0] + aDir[1] * bDir[1];
+                                // If they don't fold back on themselves
+                                if (dot > -0.5) { 
+                                    matched = c;
+                                    break;
+                                }
+                            }
+                        }
+                        if (matched) {
+                            let ptsA = matched.aRev ? [...a.pts].reverse() : a.pts;
+                            let ptsB = matched.bRev ? [...b.pts].reverse() : b.pts;
+                            // Concat, removing the duplicate junction pixel
+                            polys[i] = { pts: ptsA.concat(ptsB.slice(1)), closed: false };
+                            polys.splice(j, 1);
+                            merged = true;
+                            j = i;
+                        }
+                    }
+                }
+            }
+            return polys;
         }
+
+        // ---- full pipeline from cached edge map ----
+
+        function buildStrokes({ edgeNorm, softMask, w, h, detail, specks, minLen, bgKeep }) {
+            const edge = computeEdgeMask({ edgeNorm, softMask, w, h, detail, specks, bgKeep });
+            let skel = skeletonize(edge, w, h);
+            
+            // Do NOT prune spurs before tracing, or you break lines at junctions.
+            // skel = pruneJunctionSpurs(skel, w, h, 4); // <-- DISABLED
+            
+            let rawPolys = traceSkeletonToPolylines(skel, w, h);
+            
+            // JOIN the polylines at junctions FIRST
+            rawPolys = joinPolylines(rawPolys);
+
+            const strokes = [];
+
+            for (const r of rawPolys) {
+                const pts = r.pts.map(i => [i % w, (i / w) | 0]);
+                if (pts.length < 2) continue;
+                
+                // NOW apply the length filter to the joined lines
+                if (polylineLength(pts) < minLen) continue;
+
+                // Simplify pixel stair-steps (eps = 1.8)
+                const simplified = simplifyDP(pts, 1.8);
+                // Chaikin smoothing
+                const smoothed = chaikin(simplified, r.closed, 2);
+                if (smoothed.length >= 2) {
+                    strokes.push({ pts: smoothed, closed: r.closed });
+                }
+            }
+            return strokes;
+        }
+        // END
+        
         // </PURE>
 
         // ---------- DOM + pipeline ----------
