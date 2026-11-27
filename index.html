@@ -800,7 +800,7 @@
             const edge = computeEdgeMask({ edgeNorm, gate, w, h, detail, specks });
             // 2. skeletonise + prune spurs
             let skel = skeletonize(edge, w, h);
-            skel = pruneSpurs(skel, w, h, 8);
+            skel = pruneSpurs(skel, w, h, 3);
             // 3. trace to polylines
             const rawPolys = traceSkeletonToPolylines(skel, w, h);
             const strokes = [];
