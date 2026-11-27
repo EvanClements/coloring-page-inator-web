@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Background Removal + TEED Coloring Page (v2.2)</title>
+    <title>Background Suppression + TEED Coloring Page (v2.3)</title>
     <style>
         body { font-family: system-ui, sans-serif; max-width: 900px; margin: 20px auto; padding: 0 16px; }
         h1 { font-size: 1.4rem; }
@@ -11,7 +11,7 @@
         #status { color: #666; margin: 12px 0; font-weight: bold; }
         .controls { margin: 16px 0; padding: 12px; border: 1px solid #ddd; border-radius: 6px; }
         canvas { border: 1px solid #ddd; max-width: 100%; height: auto; margin: 8px 0; background: #fff; }
-        button { padding: 8px 16px; cursor: pointer; font-size: 1rem; }
+        button { padding: 8px 16px; cursor: pointer; font-size: 1rem; margin-right: 8px; }
         button:disabled { opacity: 0.5; cursor: default; }
         .hidden { display: none; }
         .progress-bar { width: 100%; height: 20px; background: #eee; border-radius: 10px; overflow: hidden; margin-top: 8px; }
@@ -27,7 +27,7 @@
     </style>
 </head>
 <body>
-    <h1>Background Removal + TEED</h1>
+    <h1>Background Suppression + TEED (v2.3)</h1>
 
     <div class="controls">
         <input type="file" id="fileInput" accept="image/*">
@@ -38,34 +38,40 @@
         </div>
     </div>
 
-    <h3>1. Foreground (Background Removed)</h3>
+    <h3>1. Foreground Mask Preview</h3>
     <canvas id="foregroundCanvas" class="hidden"></canvas>
 
     <h3>2. TEED Edge Output → Vector Strokes (Coloring Page)</h3>
     <div class="tune">
-        <label>Detail (higher = more lines) <span class="val" id="detailVal">50</span>
-            <input type="range" id="detail" min="0" max="150" step="1" value="50" disabled>
+        <label>Detail (higher = more lines) <span class="val" id="detailVal">70</span>
+            <input type="range" id="detail" min="0" max="150" step="1" value="70" disabled>
         </label>
         <label>Remove small specks <span class="val" id="specksVal">0.02% of image</span>
             <input type="range" id="specks" min="0" max="5" step="0.1" value="0.2" disabled>
         </label>
-        <label>Min stroke length <span class="val" id="minLenVal">20 px</span>
-            <input type="range" id="minLen" min="5" max="60" step="1" value="20" disabled>
+        <label>Min stroke length <span class="val" id="minLenVal">16 px</span>
+            <input type="range" id="minLen" min="5" max="60" step="1" value="16" disabled>
         </label>
-        <label>Stroke thickness (output px) <span class="val" id="thickVal">2 px</span>
-            <input type="range" id="thick" min="1" max="8" step="1" value="2" disabled>
+        <label>Stroke thickness (output px) <span class="val" id="thickVal">3 px</span>
+            <input type="range" id="thick" min="1" max="8" step="1" value="3" disabled>
         </label>
         <label class="check">
             <input type="checkbox" id="useBg" checked disabled>
-            Use background removal (subject crop + smoothed silhouette outline)
+            Use background suppression (fades background texture while keeping subject whole)
+        </label>
+        <label>Background texture kept <span class="val" id="bgKeepVal">15%</span>
+            <input type="range" id="bgKeep" min="0" max="100" step="1" value="15" disabled>
         </label>
         <label>Texture smoothing (re-runs TEED on release) <span class="val" id="smoothVal">0 px</span>
             <input type="range" id="smooth" min="0" max="4" step="1" value="0" disabled>
         </label>
-        <div class="note">Strokes are skeletonised, length-filtered, simplified, smoothed (Chaikin ×2) and rendered as vector paths. Preview at 2× inference resolution.</div>
+        <div class="note">Full-frame preservation with soft background attenuation, smoothed edge ridges, Chaikin curve smoothing, and pure black-and-white thresholding.</div>
     </div>
     <canvas id="outputCanvas"></canvas>
-    <button id="downloadBtn" disabled>Download PNG</button>
+    <div>
+        <button id="downloadBtn" disabled>Download PNG</button>
+        <button id="downloadA4Btn" disabled>Download A4 Printable PNG</button>
+    </div>
 
     <h3>Debug Log</h3>
     <textarea id="debugLog" readonly placeholder="Debug information will appear here..."></textarea>
@@ -75,14 +81,13 @@
         import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/+esm';
 
         const TEED_FALLBACK = 512;   // fixed input size used if the model rejects the crop size
-        const SUBJECT_PAD = 0.08;    // padding around subject box, fraction of box size
         const ANALYSIS_MAX = 2048;   // long edge of alpha analysis copy (iOS canvas memory)
         const LONG_EDGE = 1024;      // TEED input long edge (inference grid)
         const OUTPUT_SCALE = 2;      // preview/export rasteriser scale vs inference grid
 
         // <PURE>
         // Pure helpers: typed arrays in, typed arrays out, no DOM.
-        // Grid convention: index = y * w + x. Masks are Uint8Array 0/1.
+        // Grid convention: index = y * w + x.
 
         // ---- colour / alpha helpers ----
 
@@ -133,12 +138,11 @@
             }
         }
 
-        // Gaussian blur of a single-channel Uint8Array (mask). Radius in pixels; kernel built once.
-        function gaussianBlurU8(src, w, h, radius) {
-            const out = new Uint8Array(src.length);
-            if (radius <= 0) { out.set(src); return out; }
-            const sigma = radius / 2.5;
-            const k = Math.ceil(radius * 2);
+        // Gaussian blur for Float32Array maps (used for soft mask and ridge pre-smoothing)
+        function gaussianBlurF32(src, w, h, radius) {
+            if (radius <= 0) return new Float32Array(src);
+            const sigma = radius / 2.0;
+            const k = Math.max(1, Math.ceil(radius * 2));
             const ksize = 2 * k + 1;
             const kernel = new Float32Array(ksize);
             let sum = 0;
@@ -154,20 +158,20 @@
                 for (let x = 0; x < w; x++) {
                     let acc = 0;
                     for (let i = 0; i < ksize; i++) {
-                        const nx = x + i - k;
-                        const cx = nx < 0 ? 0 : (nx >= w ? w - 1 : nx);
-                        acc += src[y * w + cx] * kernel[i];
+                        const nx = Math.min(w - 1, Math.max(0, x + i - k));
+                        acc += src[y * w + nx] * kernel[i];
                     }
                     tmp[y * w + x] = acc;
                 }
             }
+
+            const out = new Float32Array(w * h);
             for (let y = 0; y < h; y++) {
                 for (let x = 0; x < w; x++) {
                     let acc = 0;
                     for (let i = 0; i < ksize; i++) {
-                        const ny = y + i - k;
-                        const cy = ny < 0 ? 0 : (ny >= h ? h - 1 : ny);
-                        acc += tmp[cy * w + x] * kernel[i];
+                        const ny = Math.min(h - 1, Math.max(0, y + i - k));
+                        acc += tmp[ny * w + x] * kernel[i];
                     }
                     out[y * w + x] = acc;
                 }
@@ -219,41 +223,13 @@
             return out;
         }
 
-        // ---- mask geometry ----
+        // ---- sizing & connected components ----
 
-        function findSubjectBox(alpha, w, h, thr = 128) {
-            let x0 = w, y0 = h, x1 = -1, y1 = -1;
-            for (let y = 0; y < h; y++) {
-                for (let x = 0; x < w; x++) {
-                    if (alpha[y * w + x] > thr) {
-                        if (x < x0) x0 = x;
-                        if (x > x1) x1 = x;
-                        if (y < y0) y0 = y;
-                        if (y > y1) y1 = y;
-                    }
-                }
-            }
-            if (x1 < 0) return null;
-            return { x0, y0, x1: x1 + 1, y1: y1 + 1 };
-        }
-
-        function cropRectOriginal(box, aw, ah, ow, oh, padFrac = SUBJECT_PAD) {
-            const sx = ow / aw, sy = oh / ah;
-            const bx0 = box.x0 * sx, by0 = box.y0 * sy, bx1 = box.x1 * sx, by1 = box.y1 * sy;
-            const padX = (bx1 - bx0) * padFrac, padY = (by1 - by0) * padFrac;
+        function inferenceSize(ow, oh, longEdge = LONG_EDGE) {
+            const s = Math.min(1, longEdge / Math.max(ow, oh));
             return {
-                x0: Math.max(0, Math.floor(bx0 - padX)),
-                y0: Math.max(0, Math.floor(by0 - padY)),
-                x1: Math.min(ow, Math.ceil(bx1 + padX)),
-                y1: Math.min(oh, Math.ceil(by1 + padY)),
-            };
-        }
-
-        function cropOutputSize(cw, ch, longEdge = LONG_EDGE) {
-            const s = longEdge / Math.max(cw, ch);
-            return {
-                W: Math.max(16, Math.round(cw * s / 16) * 16),
-                H: Math.max(16, Math.round(ch * s / 16) * 16),
+                W: Math.max(16, Math.round((ow * s) / 16) * 16),
+                H: Math.max(16, Math.round((oh * s) / 16) * 16),
             };
         }
 
@@ -294,118 +270,30 @@
             return { labels, sizes: Int32Array.from(sizes), count };
         }
 
-        function morphDisk(src, w, h, r, dilate) {
-            const W1 = w + 1;
-            const pre = new Int32Array(h * W1);
-            for (let y = 0; y < h; y++) {
-                const rowIn = y * w, rowP = y * W1;
-                for (let x = 0; x < w; x++) pre[rowP + x + 1] = pre[rowP + x] + src[rowIn + x];
-            }
-            const count = 2 * r + 1;
-            const dys = new Int32Array(count), hws = new Int32Array(count);
-            for (let k = 0; k < count; k++) {
-                const dy = k - r;
-                dys[k] = dy;
-                hws[k] = Math.floor(Math.sqrt(r * r - dy * dy));
-            }
-            const out = new Uint8Array(w * h);
-            for (let y = 0; y < h; y++) {
-                for (let x = 0; x < w; x++) {
-                    let v = dilate ? 0 : 1;
-                    for (let k = 0; k < count; k++) {
-                        const yy = y + dys[k];
-                        if (yy < 0 || yy >= h) continue;
-                        const hw = hws[k];
-                        const lo = x - hw < 0 ? 0 : x - hw;
-                        const hi = x + hw > w - 1 ? w - 1 : x + hw;
-                        const s = pre[yy * W1 + hi + 1] - pre[yy * W1 + lo];
-                        if (dilate) {
-                            if (s > 0) { v = 1; break; }
-                        } else if (s < hi - lo + 1) {
-                            v = 0; break;
-                        }
-                    }
-                    out[y * w + x] = v;
-                }
-            }
-            return out;
-        }
+        // ---- soft mask stage ----
 
-        const dilateDisk = (src, w, h, r) => morphDisk(src, w, h, r, true);
-        const erodeDisk = (src, w, h, r) => morphDisk(src, w, h, r, false);
-        const closeMask = (bin, w, h, r) => erodeDisk(dilateDisk(bin, w, h, r), w, h, r);
-
-        function fillHoles(bin, w, h) {
+        // Build a soft [0..1] subject mask without hard cropping or eroded gates.
+        // Uses a broad Gaussian blur so partially-faded fur transitions smoothly.
+        function buildSoftMask(alphaFull, w, h, useBG) {
             const n = w * h;
-            const reach = new Uint8Array(n);
-            const stack = new Int32Array(n);
-            let sp = 0;
-            const seed = (i) => {
-                if (!bin[i] && !reach[i]) { reach[i] = 1; stack[sp++] = i; }
-            };
-            for (let x = 0; x < w; x++) { seed(x); seed((h - 1) * w + x); }
-            for (let y = 0; y < h; y++) { seed(y * w); seed(y * w + w - 1); }
-            while (sp > 0) {
-                const p = stack[--sp];
-                const y = (p / w) | 0, x = p - y * w;
-                if (x > 0) seed(p - 1);
-                if (x < w - 1) seed(p + 1);
-                if (y > 0) seed(p - w);
-                if (y < h - 1) seed(p + w);
+            if (!useBG || !alphaFull) {
+                return new Float32Array(n).fill(1);
             }
-            const out = new Uint8Array(n);
-            for (let i = 0; i < n; i++) out[i] = (bin[i] || !reach[i]) ? 1 : 0;
-            return out;
-        }
-
-        function largestComponent(bin, w, h) {
-            const n = w * h;
-            const { labels, sizes, count } = labelComponents(bin, w, h, true);
-            const out = new Uint8Array(n);
-            if (count === 0) return out;
-            let best = 1;
-            for (let k = 2; k <= count; k++) if (sizes[k] > sizes[best]) best = k;
-            for (let i = 0; i < n; i++) out[i] = labels[i] === best ? 1 : 0;
-            return out;
-        }
-
-        // Gaussian-blur + threshold a mask. Blur radius is relative to the analysis grid's
-        // long edge so results are consistent across photos. Returns a new binary mask.
-        function smoothMask(mask, w, h, longEdge) {
-            const radius = Math.max(1.5, Math.min(5, 0.004 * longEdge));
-            const blurred = gaussianBlurU8(mask, w, h, radius);
-            const out = new Uint8Array(w * h);
-            for (let i = 0; i < out.length; i++) out[i] = blurred[i] >= 128 ? 1 : 0;
-            return largestComponent(fillHoles(out, w, h), w, h);
-        }
-
-        // ---- mask stage ----
-
-        // Build (and cache) the smoothed mask. Gate erosion is now 1px, not 3px -- the 3px
-        // erode was throwing away eyes and nose near the subject boundary.
-        function buildMasks(alphaCrop, w, h, useBG) {
-            const n = w * h;
-            if (!useBG || !alphaCrop) {
-                const ones = new Uint8Array(n).fill(1);
-                return { mask: ones, gate: ones };
+            const radius = Math.max(4, Math.min(16, 0.015 * Math.max(w, h)));
+            const floatAlpha = new Float32Array(n);
+            for (let i = 0; i < n; i++) {
+                // Boost mid-alpha pixels slightly so faint fur/whiskers stay protected
+                const a = alphaFull[i] / 255;
+                floatAlpha[i] = Math.min(1, Math.pow(a, 0.7));
             }
-            const bin = new Uint8Array(n);
-            for (let i = 0; i < n; i++) bin[i] = alphaCrop[i] > 128 ? 1 : 0;
-            let mask = closeMask(bin, w, h, 3);
-            mask = fillHoles(mask, w, h);
-            mask = largestComponent(mask, w, h);
-            const smoothed = smoothMask(mask, w, h, Math.max(w, h));
-            const gate = erodeDisk(smoothed, w, h, 1); // was 3 -- see review
-            return { mask: smoothed, gate };
+            return gaussianBlurF32(floatAlpha, w, h, radius);
         }
 
         // ---- edge map -> binary edge mask ----
 
-        // Detail slider goes to 150 now. hi can go negative at the top end (meaning
-        // "keep almost everything"); the specks + length + skeleton filters still clean up.
         function thresholdsFromDetail(detail) {
             const hi = 0.85 - 0.5 * (detail / 100);
-            return { hi, lo: hi * 0.5 };
+            return { hi, lo: Math.max(0.02, hi * 0.5) };
         }
 
         function minAreaFromSlider(value, w, h) {
@@ -452,22 +340,27 @@
             return out;
         }
 
-        // Edge map + gate -> binary edge mask. NO dilation here: thickness comes from
-        // stroke-width at render time. This is the key change from v2.1.
-        function computeEdgeMask({ edgeNorm, gate, w, h, detail, specks }) {
+        function computeEdgeMask({ edgeNorm, softMask, w, h, detail, specks, bgKeep }) {
             const n = w * h;
             const { hi, lo } = thresholdsFromDetail(detail);
-            const gated = new Float32Array(n);
-            for (let i = 0; i < n; i++) gated[i] = gate[i] ? edgeNorm[i] : 0;
-            const edge = hysteresis(gated, w, h, lo, hi);
+
+            // Lightly smooth ridge noise, then softly attenuate background edges
+            const smoothedEdges = gaussianBlurF32(edgeNorm, w, h, 0.9);
+            const weighted = new Float32Array(n);
+            for (let i = 0; i < n; i++) {
+                const m = softMask ? softMask[i] : 1;
+                const factor = bgKeep + (1 - bgKeep) * m;
+                weighted[i] = smoothedEdges[i] * factor;
+            }
+
+            const edge = hysteresis(weighted, w, h, lo, hi);
             return removeSpecks(edge, w, h, minAreaFromSlider(specks, w, h));
         }
 
         // ---- skeletonisation (Zhang-Suen) ----
 
         function skeletonize(bin, w, h) {
-            const img = new Uint8Array(bin); // copy -- do not mutate caller's mask
-            const n = w * h;
+            const img = new Uint8Array(bin);
             let changed = true;
             while (changed) {
                 changed = false;
@@ -511,16 +404,10 @@
             return img;
         }
 
-        // Remove dead-end branches shorter than minLen pixels. Iterative: strip endpoints,
-        // count steps, restore if the branch was long enough. Simple and correct for the
-        // small branch counts here; the skeleton is ~1px wide so cost is O(n * minLen).
-        function pruneSpurs(skel, w, h, minLen) {
+        // Remove only tiny junction spurs (short side-twigs <= 4px attached to a junction)
+        function pruneJunctionSpurs(skel, w, h, maxSpurLen = 4) {
             const out = new Uint8Array(skel);
-            const n = w * h;
-            // Mark "removable" pixels: endpoints and their short chains.
-            // Approach: repeatedly find endpoints, walk up to minLen steps, if we hit a
-            // junction before minLen, the chain is a spur -- delete it.
-            for (let iter = 0; iter < 4; iter++) {
+            for (let iter = 0; iter < 3; iter++) {
                 let removedAny = false;
                 const endpoints = [];
                 for (let y = 1; y < h - 1; y++) {
@@ -538,11 +425,12 @@
                     if (!out[start]) continue;
                     const chain = [start];
                     let cur = start;
-                    let hitJunction = false;
                     let prev = -1;
-                    for (let step = 0; step < minLen; step++) {
+                    let hitJunction = false;
+
+                    for (let step = 0; step < maxSpurLen; step++) {
                         const y = (cur / w) | 0, x = cur - y * w;
-                        let next = -1, deg = 0, jx = -1, jy = -1;
+                        let next = -1, deg = 0;
                         for (let dy = -1; dy <= 1; dy++) {
                             for (let dx = -1; dx <= 1; dx++) {
                                 if (!dx && !dy) continue;
@@ -551,24 +439,21 @@
                                 const q = ny * w + nx;
                                 if (!out[q] || q === prev) continue;
                                 deg++;
-                                if (next < 0) { next = q; jx = nx; jy = ny; }
-                                else { hitJunction = true; }
+                                if (next < 0) next = q;
                             }
                         }
-                        if (deg === 0) break;
-                        if (deg >= 3) { hitJunction = true; break; }
-                        if (next < 0) break;
+                        if (deg >= 2) {
+                            hitJunction = true;
+                            break;
+                        }
+                        if (deg === 0 || next < 0) break;
                         chain.push(next);
                         prev = cur;
                         cur = next;
                     }
-                    if (!hitJunction && chain.length <= minLen) {
-                        // stub with no junction: remove
+
+                    if (hitJunction && chain.length <= maxSpurLen) {
                         for (const c of chain) out[c] = 0;
-                        removedAny = true;
-                    } else if (hitJunction && chain.length < minLen) {
-                        // spur: remove, but keep the junction pixel itself
-                        for (let i = 0; i < chain.length - 1; i++) out[chain[i]] = 0;
                         removedAny = true;
                     }
                 }
@@ -579,9 +464,6 @@
 
         // ---- skeleton -> polylines ----
 
-        // Walk the skeleton between junctions/endpoints. Emits { pts: [[x,y],...], closed }.
-        // Junction pixels are considered part of every incident branch but are not
-        // duplicated in the interior of a single polyline.
         function traceSkeletonToPolylines(skel, w, h) {
             const n = w * h;
             const visited = new Uint8Array(n);
@@ -614,8 +496,6 @@
                 return out;
             };
 
-            // Start a branch from an endpoint or a junction pixel; walk until we hit another
-            // endpoint/junction. Visits junction pixels but does not consume them.
             const walkBranch = (start) => {
                 const pts = [start];
                 visited[start] = 1;
@@ -623,17 +503,16 @@
                 const isJunctionStart = !!junction[start];
                 while (true) {
                     const nb = neighbours(cur);
+                    // Detect closed loop returning to start
+                    if (!isJunctionStart && pts.length > 2 && nb.includes(start)) {
+                        return { pts, closed: true };
+                    }
                     const nexts = nb.filter(p => p !== prev && (!visited[p] || junction[p]));
-                    // Prefer unvisited non-junction continuation
                     let next = -1;
                     for (const p of nexts) {
                         if (!visited[p]) { next = p; break; }
                     }
                     if (next < 0) {
-                        // closed loop detection: if we returned to start and start is unvisited-junction
-                        if (cur !== start && nb.includes(start) && pts.length > 2 && !isJunctionStart) {
-                            return { pts, closed: true };
-                        }
                         return { pts, closed: false };
                     }
                     if (junction[next] && next !== start) {
@@ -650,26 +529,22 @@
             // 1) endpoints
             for (let i = 0; i < n; i++) {
                 if (!skel[i] || visited[i] || junction[i]) continue;
-                let deg = 0;
-                for (const _ of neighbours(i)) deg++;
-                if (deg === 1) {
+                if (neighbours(i).length === 1) {
                     polys.push(walkBranch(i));
                 }
             }
             // 2) junctions not yet fully consumed
             for (let i = 0; i < n; i++) {
                 if (!skel[i] || visited[i] || !junction[i]) continue;
-                // walk from each unvisited neighbour
                 for (const p of neighbours(i)) {
                     if (visited[p]) continue;
                     const r = walkBranch(p);
                     if (r.pts.length >= 2) polys.push(r);
                 }
             }
-            // 3) leftover pure loops (no endpoints, no junctions)
+            // 3) leftover pure loops
             for (let i = 0; i < n; i++) {
                 if (!skel[i] || visited[i]) continue;
-                // find any unvisited pixel with degree 2
                 const r = walkBranch(i);
                 if (r.pts.length >= 3) polys.push(r);
             }
@@ -719,7 +594,6 @@
             return out;
         }
 
-        // Chaikin corner cutting. Keeps endpoints (unless closed, then no endpoints).
         function chaikin(pts, closed, passes) {
             let cur = pts.map(p => [p[0], p[1]]);
             for (let pass = 0; pass < passes; pass++) {
@@ -746,82 +620,25 @@
             return cur;
         }
 
-        // ---- silhouette contour ----
-
-        // Moore-neighbour boundary trace of a binary mask. Returns one closed polyline
-        // per connected component (we assume the caller has already reduced to one).
-        function traceMaskContour(mask, w, h) {
-            // Find first mask pixel scanning row-major.
-            let sx = -1, sy = -1;
-            outer: for (let y = 0; y < h; y++) {
-                for (let x = 0; x < w; x++) {
-                    if (mask[y * w + x]) { sx = x; sy = y; break outer; }
-                }
-            }
-            if (sx < 0) return [];
-            // Moore neighbourhood directions in clockwise order starting from W.
-            const dirs = [[-1,0],[-1,-1],[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1]];
-            const contour = [[sx, sy]];
-            let cx = sx, cy = sy;
-            let prevDir = 0;
-            const startX = sx, startY = sy;
-            let steps = 0;
-            const maxSteps = w * h * 8;
-            while (steps++ < maxSteps) {
-                let found = false;
-                for (let k = 0; k < 8; k++) {
-                    const d = (prevDir + k) % 8;
-                    const nx = cx + dirs[d][0];
-                    const ny = cy + dirs[d][1];
-                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-                    if (!mask[ny * w + nx]) continue;
-                    cx = nx; cy = ny;
-                    prevDir = (d + 6) % 8; // start search from previous direction -1
-                    contour.push([cx, cy]);
-                    found = true;
-                    break;
-                }
-                if (!found) break;
-                if (cx === startX && cy === startY && contour.length > 2) break;
-            }
-            if (contour.length > 2 && contour[0][0] === contour[contour.length - 1][0] &&
-                contour[0][1] === contour[contour.length - 1][1]) {
-                contour.pop();
-            }
-            return contour;
-        }
-
         // ---- full pipeline from cached edge map ----
 
-        // Returns an array of stroke paths, each { pts: [[x,y],...], closed, isSilhouette }.
-        // All coordinates are in the inference grid (W x H); the renderer scales up.
-        function buildStrokes({ edgeNorm, mask, gate, w, h, useBG, detail, specks, minLen }) {
-            // 1. binary edge mask (no dilation)
-            const edge = computeEdgeMask({ edgeNorm, gate, w, h, detail, specks });
-            // 2. skeletonise + prune spurs
+        function buildStrokes({ edgeNorm, softMask, w, h, detail, specks, minLen, bgKeep }) {
+            const edge = computeEdgeMask({ edgeNorm, softMask, w, h, detail, specks, bgKeep });
             let skel = skeletonize(edge, w, h);
-            skel = pruneSpurs(skel, w, h, 3);
-            // 3. trace to polylines
+            skel = pruneJunctionSpurs(skel, w, h, 4);
             const rawPolys = traceSkeletonToPolylines(skel, w, h);
             const strokes = [];
+
             for (const r of rawPolys) {
                 const pts = r.pts.map(i => [i % w, (i / w) | 0]);
                 if (pts.length < 2) continue;
-                const len = polylineLength(pts);
-                if (len < minLen) continue;
-                // DP pre-pass at small epsilon (collinear-only)
-                let simplified = simplifyDP(pts, 0.6);
-                // Chaikin ×2
-                let smoothed = chaikin(simplified, r.closed, 2);
-                if (smoothed.length < 2) continue;
-                strokes.push({ pts: smoothed, closed: r.closed, isSilhouette: false });
-            }
-            // 4. smoothed silhouette contour (separate, closed path)
-            if (useBG && mask) {
-                const contour = traceMaskContour(mask, w, h);
-                if (contour.length > 3) {
-                    let smoothed = chaikin(contour, true, 2);
-                    strokes.push({ pts: smoothed, closed: true, isSilhouette: true });
+                if (polylineLength(pts) < minLen) continue;
+
+                // Simplify pixel stair-steps (eps = 1.8) before Chaikin smoothing
+                const simplified = simplifyDP(pts, 1.8);
+                const smoothed = chaikin(simplified, r.closed, 2);
+                if (smoothed.length >= 2) {
+                    strokes.push({ pts: smoothed, closed: r.closed });
                 }
             }
             return strokes;
@@ -835,28 +652,33 @@
         const fgCanvas = document.getElementById('foregroundCanvas');
         const outCanvas = document.getElementById('outputCanvas');
         const downloadBtn = document.getElementById('downloadBtn');
+        const downloadA4Btn = document.getElementById('downloadA4Btn');
         const progressContainer = document.getElementById('progressContainer');
         const progressFill = document.getElementById('progressFill');
         const debugLog = document.getElementById('debugLog');
+
         const detailEl = document.getElementById('detail');
         const specksEl = document.getElementById('specks');
         const minLenEl = document.getElementById('minLen');
         const thickEl = document.getElementById('thick');
         const useBgEl = document.getElementById('useBg');
+        const bgKeepEl = document.getElementById('bgKeep');
         const smoothEl = document.getElementById('smooth');
+
         const detailVal = document.getElementById('detailVal');
         const specksVal = document.getElementById('specksVal');
         const minLenVal = document.getElementById('minLenVal');
         const thickVal = document.getElementById('thickVal');
+        const bgKeepVal = document.getElementById('bgKeepVal');
         const smoothVal = document.getElementById('smoothVal');
-        const tunableEls = [detailEl, specksEl, minLenEl, thickEl, useBgEl, smoothEl];
+        const tunableEls = [detailEl, specksEl, minLenEl, thickEl, useBgEl, bgKeepEl, smoothEl];
 
         const fgCtx = fgCanvas.getContext('2d');
         const outCtx = outCanvas.getContext('2d');
 
         let uploadedImageBlob = null;
         let session = null;
-        // cache: { hasBg, W, H, cropRGBA, edgeNorm, fgAlphaCrop, masks, strokesCache }
+        // cache: { hasBg, W, H, imgRGBA, edgeNorm, fgAlphaFull, masks, strokesCache }
         let cache = null;
         let generation = 0;
         let pending = 0;
@@ -898,6 +720,7 @@
                 minLen: Number(minLenEl.value),
                 thickness: Number(thickEl.value),
                 useBG: useBgEl.checked,
+                bgKeep: Number(bgKeepEl.value) / 100,
             };
         }
 
@@ -906,6 +729,7 @@
             specksVal.textContent = `${(Number(specksEl.value) / 10).toFixed(2)}% of image`;
             minLenVal.textContent = `${minLenEl.value} px`;
             thickVal.textContent = `${thickEl.value} px`;
+            bgKeepVal.textContent = `${bgKeepEl.value}%`;
             smoothVal.textContent = `${smoothEl.value} px`;
         }
 
@@ -913,8 +737,10 @@
             const busy = pending > 0;
             const ready = !!cache && !busy;
             for (const el of tunableEls) el.disabled = !ready;
+            bgKeepEl.disabled = !ready || !useBgEl.checked;
             processBtn.disabled = busy || !uploadedImageBlob || !session;
             downloadBtn.disabled = busy || !cache;
+            downloadA4Btn.disabled = busy || !cache;
             progressContainer.classList.toggle('hidden', !busy);
         }
 
@@ -938,7 +764,7 @@
             });
         }
 
-        // Paint the stroke list onto outCanvas at OUTPUT_SCALE. Thickness is in output px.
+        // Paint strokes onto outCanvas at OUTPUT_SCALE, then threshold to pure B&W
         function paintStrokes(strokes, W, H, thickness) {
             const outW = W * OUTPUT_SCALE, outH = H * OUTPUT_SCALE;
             if (outCanvas.width !== outW || outCanvas.height !== outH) {
@@ -952,22 +778,30 @@
             outCtx.lineCap = 'round';
             outCtx.lineJoin = 'round';
 
-            // Build one Path2D for the edges, one for the silhouette -- silhouette drawn on
-            // top so it always reads as a clean outer boundary.
             const edgePath = new Path2D();
-            const silPath = new Path2D();
             for (const s of strokes) {
-                const target = s.isSilhouette ? silPath : edgePath;
                 const pts = s.pts;
                 if (pts.length < 2) continue;
-                target.moveTo(pts[0][0] * OUTPUT_SCALE, pts[0][1] * OUTPUT_SCALE);
+                edgePath.moveTo(pts[0][0] * OUTPUT_SCALE, pts[0][1] * OUTPUT_SCALE);
                 for (let i = 1; i < pts.length; i++) {
-                    target.lineTo(pts[i][0] * OUTPUT_SCALE, pts[i][1] * OUTPUT_SCALE);
+                    edgePath.lineTo(pts[i][0] * OUTPUT_SCALE, pts[i][1] * OUTPUT_SCALE);
                 }
-                if (s.closed) target.closePath();
+                if (s.closed) edgePath.closePath();
             }
             outCtx.stroke(edgePath);
-            outCtx.stroke(silPath);
+
+            // Hard binary threshold to eliminate anti-aliased gray pixels
+            const img = outCtx.getImageData(0, 0, outW, outH);
+            const px = img.data;
+            for (let i = 0; i < px.length; i += 4) {
+                const lum = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+                const v = lum < 140 ? 0 : 255;
+                px[i] = v;
+                px[i + 1] = v;
+                px[i + 2] = v;
+                px[i + 3] = 255;
+            }
+            outCtx.putImageData(img, 0, 0);
         }
 
         function renderFromCache() {
@@ -976,17 +810,24 @@
             const p = readParams();
             const useBG = p.useBG && c.hasBg;
             const key = useBG ? 'bg' : 'free';
-            if (!c.masks[key]) c.masks[key] = buildMasks(c.fgAlphaCrop, c.W, c.H, useBG);
-            const { mask, gate } = c.masks[key];
+            if (!c.masks[key]) {
+                c.masks[key] = buildSoftMask(c.fgAlphaFull, c.W, c.H, useBG);
+            }
+            const softMask = c.masks[key];
+            const effectiveBgKeep = useBG ? p.bgKeep : 1.0;
 
-            // Strokes are expensive (skeleton + trace). Cache them keyed on everything
-            // that changes the binary mask, not on thickness.
-            const strokeKey = `${p.detail}|${p.specks}|${p.minLen}|${useBG}`;
+            const strokeKey = `${p.detail}|${p.specks}|${p.minLen}|${useBG}|${effectiveBgKeep}`;
             if (!c.strokesCache) c.strokesCache = {};
             if (!c.strokesCache[strokeKey]) {
                 c.strokesCache[strokeKey] = buildStrokes({
-                    edgeNorm: c.edgeNorm, mask, gate, w: c.W, h: c.H, useBG,
-                    detail: p.detail, specks: p.specks, minLen: p.minLen,
+                    edgeNorm: c.edgeNorm,
+                    softMask,
+                    w: c.W,
+                    h: c.H,
+                    detail: p.detail,
+                    specks: p.specks,
+                    minLen: p.minLen,
+                    bgKeep: effectiveBgKeep,
                 });
             }
             paintStrokes(c.strokesCache[strokeKey], c.W, c.H, p.thickness);
@@ -1034,18 +875,36 @@
             let fgBmp = null, origBmp = null;
             try {
                 setProgress(0);
-                logDebug(`--- ${reason}: background removal ${useBG ? 'ON' : 'OFF'}, texture blur ${blurR}px ---`);
+                logDebug(`--- ${reason}: background suppression ${useBG ? 'ON' : 'OFF'}, texture blur ${blurR}px ---`);
 
-                let alphaCanvas = null, alphaW = 0, alphaH = 0, box = null;
+                origBmp = await createImageBitmap(file);
+                const origW = origBmp.width, origH = origBmp.height;
+                const { W, H } = inferenceSize(origW, origH);
+                logDebug(`Original ${origW}x${origH}; full-frame TEED size ${W}x${H}`);
+
+                const fullCanvas = makeCanvas(W, H);
+                resources.push(fullCanvas);
+                const cctx = fullCanvas.getContext('2d');
+                cctx.imageSmoothingEnabled = true;
+                cctx.imageSmoothingQuality = 'high';
+                cctx.fillStyle = '#ffffff';
+                cctx.fillRect(0, 0, W, H);
+                cctx.drawImage(origBmp, 0, 0, origW, origH, 0, 0, W, H);
+                const imgRGBA = cctx.getImageData(0, 0, W, H).data;
+                origBmp.close();
+                origBmp = null;
+
+                let fgAlphaFull = null;
+                let hasBg = false;
                 if (useBG) {
-                    statusEl.textContent = 'Removing background...';
-                    logDebug('Starting background removal...');
+                    statusEl.textContent = 'Detecting subject mask...';
+                    logDebug('Starting background segmentation...');
                     const fgBlob = await removeBackground(file, {
                         progress: (key, current, total) => {
                             if (total) setProgress((current / total) * 70);
                         }
                     });
-                    logDebug('Background removal complete.');
+                    logDebug('Background segmentation complete.');
                     fgBmp = await createImageBitmap(fgBlob);
 
                     fgCanvas.width = fgBmp.width;
@@ -1054,63 +913,26 @@
                     fgCtx.fillRect(0, 0, fgBmp.width, fgBmp.height);
                     fgCtx.drawImage(fgBmp, 0, 0);
                     fgCanvas.classList.remove('hidden');
-                    logDebug(`Foreground image size: ${fgBmp.width}x${fgBmp.height}`);
 
-                    const k = Math.min(1, ANALYSIS_MAX / Math.max(fgBmp.width, fgBmp.height));
-                    alphaW = Math.max(1, Math.round(fgBmp.width * k));
-                    alphaH = Math.max(1, Math.round(fgBmp.height * k));
-                    alphaCanvas = makeCanvas(alphaW, alphaH);
-                    resources.push(alphaCanvas);
-                    alphaCanvas.getContext('2d').drawImage(fgBmp, 0, 0, alphaW, alphaH);
-                    fgBmp.close();
-                    fgBmp = null;
-
-                    const ad = alphaCanvas.getContext('2d').getImageData(0, 0, alphaW, alphaH).data;
-                    const alpha = new Uint8Array(alphaW * alphaH);
-                    for (let i = 0; i < alpha.length; i++) alpha[i] = ad[i * 4 + 3];
-                    box = findSubjectBox(alpha, alphaW, alphaH);
-                    if (!box) logDebug('No subject pixels (alpha > 128). Using the full image with no mask.');
-                    setProgress(70);
-                }
-                const hasBg = !!box;
-
-                origBmp = await createImageBitmap(file);
-                const origW = origBmp.width, origH = origBmp.height;
-                let rect = { x0: 0, y0: 0, x1: origW, y1: origH };
-                if (hasBg) rect = cropRectOriginal(box, alphaW, alphaH, origW, origH, SUBJECT_PAD);
-                const cw = rect.x1 - rect.x0, ch = rect.y1 - rect.y0;
-                const { W, H } = cropOutputSize(cw, ch);
-                logDebug(`Original ${origW}x${origH}; crop x ${rect.x0}-${rect.x1}, y ${rect.y0}-${rect.y1}; TEED size ${W}x${H}`);
-
-                const cropCanvas = makeCanvas(W, H);
-                resources.push(cropCanvas);
-                const cctx = cropCanvas.getContext('2d');
-                cctx.imageSmoothingEnabled = true;
-                cctx.imageSmoothingQuality = 'high';
-                cctx.fillStyle = '#ffffff';
-                cctx.fillRect(0, 0, W, H);
-                cctx.drawImage(origBmp, rect.x0, rect.y0, cw, ch, 0, 0, W, H);
-                const cropRGBA = cctx.getImageData(0, 0, W, H).data;
-                origBmp.close();
-                origBmp = null;
-
-                let fgAlphaCrop = null;
-                if (hasBg) {
-                    const kx = alphaW / origW, ky = alphaH / origH;
                     const ac = makeCanvas(W, H);
                     resources.push(ac);
                     const actx = ac.getContext('2d');
                     actx.imageSmoothingEnabled = true;
                     actx.imageSmoothingQuality = 'high';
-                    actx.drawImage(alphaCanvas, rect.x0 * kx, rect.y0 * ky, cw * kx, ch * ky, 0, 0, W, H);
-                    const ad2 = actx.getImageData(0, 0, W, H).data;
-                    fgAlphaCrop = new Uint8Array(W * H);
-                    for (let i = 0; i < W * H; i++) fgAlphaCrop[i] = ad2[i * 4 + 3];
+                    actx.drawImage(fgBmp, 0, 0, fgBmp.width, fgBmp.height, 0, 0, W, H);
+                    fgBmp.close();
+                    fgBmp = null;
+
+                    const ad = actx.getImageData(0, 0, W, H).data;
+                    fgAlphaFull = new Uint8Array(W * H);
+                    for (let i = 0; i < W * H; i++) fgAlphaFull[i] = ad[i * 4 + 3];
+                    hasBg = true;
+                    setProgress(70);
                 }
 
                 statusEl.textContent = 'Processing edges with TEED...';
                 setProgress(75);
-                const edgeNorm = await inferEdges(cropRGBA, W, H, blurR);
+                const edgeNorm = await inferEdges(imgRGBA, W, H, blurR);
                 setProgress(95);
 
                 if (myGen !== generation) {
@@ -1118,7 +940,7 @@
                     return;
                 }
 
-                cache = { hasBg, W, H, cropRGBA, edgeNorm, fgAlphaCrop, masks: {}, strokesCache: {} };
+                cache = { hasBg, W, H, imgRGBA, edgeNorm, fgAlphaFull, masks: {}, strokesCache: {} };
                 renderFromCache();
                 setProgress(100);
                 logDebug('Rendering complete.');
@@ -1143,10 +965,10 @@
                 statusEl.textContent = 'Re-running TEED with texture smoothing...';
                 setProgress(10);
                 logDebug(`--- Re-run TEED: texture blur ${blurR}px ---`);
-                const edgeNorm = await inferEdges(c.cropRGBA, c.W, c.H, blurR);
+                const edgeNorm = await inferEdges(c.imgRGBA, c.W, c.H, blurR);
                 if (myGen !== generation || cache !== c) return;
                 c.edgeNorm = edgeNorm;
-                c.strokesCache = {}; // invalidate
+                c.strokesCache = {};
                 renderFromCache();
                 setProgress(100);
                 statusEl.textContent = 'Done!';
@@ -1196,11 +1018,10 @@
             enqueue(() => runPipeline(useBgEl.checked, 'Generate'));
         });
 
-        // Detail, specks, minLen: re-trace the strokes.
-        for (const el of [detailEl, specksEl, minLenEl]) {
+        for (const el of [detailEl, specksEl, minLenEl, bgKeepEl]) {
             el.addEventListener('input', () => { updateLabels(); scheduleRender(); });
         }
-        // Thickness: just repaint the cached strokes.
+
         thickEl.addEventListener('input', () => { updateLabels(); scheduleRender(); });
 
         smoothEl.addEventListener('input', updateLabels);
@@ -1211,9 +1032,10 @@
         });
 
         useBgEl.addEventListener('change', () => {
+            refreshControls();
             if (!cache) return;
             if (useBgEl.checked && !cache.hasBg) {
-                enqueue(() => runPipeline(true, 'Background removal enabled'));
+                enqueue(() => runPipeline(true, 'Background suppression enabled'));
             } else {
                 scheduleRender();
             }
@@ -1226,6 +1048,44 @@
                 const a = document.createElement('a');
                 a.href = url;
                 a.download = 'coloring-page.png';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }, 'image/png');
+        });
+
+        // A4 300 DPI printable export (2480 x 3508 px, auto-rotates for landscape photos)
+        downloadA4Btn.addEventListener('click', () => {
+            if (!outCanvas.width || !outCanvas.height) return;
+            const isLandscape = outCanvas.width > outCanvas.height;
+            const a4W = isLandscape ? 3508 : 2480;
+            const a4H = isLandscape ? 2480 : 3508;
+            const margin = 160;
+
+            const a4Canvas = makeCanvas(a4W, a4H);
+            const a4Ctx = a4Canvas.getContext('2d');
+            a4Ctx.fillStyle = '#ffffff';
+            a4Ctx.fillRect(0, 0, a4W, a4H);
+
+            const availW = a4W - margin * 2;
+            const availH = a4H - margin * 2;
+            const ratio = Math.min(availW / outCanvas.width, availH / outCanvas.height);
+            const drawW = outCanvas.width * ratio;
+            const drawH = outCanvas.height * ratio;
+            const x = (a4W - drawW) / 2;
+            const y = (a4H - drawH) / 2;
+
+            a4Ctx.imageSmoothingEnabled = false;
+            a4Ctx.drawImage(outCanvas, x, y, drawW, drawH);
+
+            a4Canvas.toBlob((blob) => {
+                releaseCanvas(a4Canvas);
+                if (!blob) return;
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'coloring-page-a4.png';
                 document.body.appendChild(a);
                 a.click();
                 a.remove();
